@@ -1,0 +1,4 @@
+firebase-admin==6.2.0
+python-dotenv==1.0.1
+numpy>=1.21.0
+rclpy>=0.10.0

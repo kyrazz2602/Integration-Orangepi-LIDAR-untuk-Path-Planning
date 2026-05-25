@@ -1,0 +1,23 @@
+[Unit]
+Description=Robot Autonomous Core (ROS 2 & Firebase)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Sesuaikan 'orangepi' dengan username di board Anda
+User=orangepi
+# Sesuaikan path ini dengan letak direktori rplidar_ros Anda di Orange Pi
+WorkingDirectory=/home/orangepi/ros2_ws/src/rplidar_ros
+# Sesuaikan path ini
+ExecStart=/bin/bash /home/orangepi/ros2_ws/src/rplidar_ros/robot_autostart.sh
+Restart=on-failure
+RestartSec=5
+
+# Menangani output log
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=robot-core
+
+[Install]
+WantedBy=multi-user.target

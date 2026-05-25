@@ -80,8 +80,14 @@ ament_target_dependencies(rplidar_client
 ################################################################################
 # Install
 ################################################################################
-install(DIRECTORY launch rviz
+install(DIRECTORY launch rviz config
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  arduino_serial_bridge.py
+  rplidar-firebase-bridge.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
