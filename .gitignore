@@ -1,3 +1,19 @@
+# ROS2
 build/
 install/
 log/
+
+# Python
+__pycache__/
+*.pyc
+
+# VSCode
+.vscode/
+
+# Secrets
+*.json
+.env
+airguard-b7ef4-firebase-adminsdk-fbsvc-6361f49d51.json
+
+# Local proxy workarounds
+powershell.bat
