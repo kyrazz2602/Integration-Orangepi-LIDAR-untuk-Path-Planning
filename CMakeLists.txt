@@ -87,6 +87,7 @@ install(DIRECTORY launch rviz config
 install(PROGRAMS
   arduino_serial_bridge.py
   rplidar-firebase-bridge.py
+  airguard-b7ef4-firebase-adminsdk-fbsvc-6361f49d51.json
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -99,7 +100,6 @@ install(
 # Macro for ament package
 ################################################################################
 ament_export_dependencies(rclcpp)
-ament_export_dependencies(std_msgs)
 ament_export_dependencies(sensor_msgs)
 ament_export_include_directories(include)
 ament_package()

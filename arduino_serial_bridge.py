@@ -20,7 +20,7 @@ class ArduinoBridge(Node):
         super().__init__('arduino_bridge')
         
         # Parameters
-        self.declare_parameter('port', '/dev/ttyS4')
+        self.declare_parameter('port', '/dev/arduino')
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('wheel_radius', 0.033) # meters (adjust according to your robot)
         self.declare_parameter('wheel_base', 0.20)    # meters (distance between wheels)
@@ -35,6 +35,7 @@ class ArduinoBridge(Node):
         self.y = 0.0
         self.th = 0.0
         self.last_time = self.get_clock().now()
+        self.first_odom = True
         
         # Setup Serial
         try:
@@ -76,26 +77,40 @@ class ArduinoBridge(Node):
 
     def serial_read_loop(self):
         """Read continuous ODOM data from Arduino"""
+        import time
         while rclpy.ok():
             try:
-                if self.ser.in_waiting > 0:
-                    line = self.ser.readline().decode('utf-8').strip()
-                    
-                    # Format: ODOM,rpmKiri,rpmKanan
-                    if line.startswith("ODOM,"):
-                        parts = line.split(',')
-                        if len(parts) == 3:
-                            rpm_left = float(parts[1])
-                            rpm_right = float(parts[2])
-                            self.process_odometry(rpm_left, rpm_right)
+                line_bytes = self.ser.readline()
+                if not line_bytes:
+                    time.sleep(0.01)
+                    continue
+                line = line_bytes.decode('utf-8', errors='ignore').strip()
+                
+                # Format: ODOM,rpmKiri,rpmKanan
+                if line.startswith("ODOM,"):
+                    parts = line.split(',')
+                    if len(parts) == 3:
+                        rpm_left = float(parts[1])
+                        rpm_right = float(parts[2])
+                        self.process_odometry(rpm_left, rpm_right)
             except Exception as e:
-                pass
+                time.sleep(0.1)
 
     def process_odometry(self, rpm_left, rpm_right):
         """Calculate x, y, theta based on wheel RPM and publish"""
         current_time = self.get_clock().now()
+        
+        if self.first_odom:
+            self.first_odom = False
+            self.last_time = current_time
+            return
+            
         dt = (current_time - self.last_time).nanoseconds / 1e9
         self.last_time = current_time
+        
+        if dt > 1.0:
+            self.get_logger().warning(f"Odom integration gap too large: {dt:.2f}s. Resetting timer.")
+            return
         
         # Convert RPM to m/s
         v_left = (rpm_left / 60.0) * 2.0 * math.pi * self.R

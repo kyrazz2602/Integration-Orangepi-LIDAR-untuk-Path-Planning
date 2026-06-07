@@ -457,8 +457,8 @@ void kirimOdometri() {
   Serial2.print("ODOM,");
   
   // Berikan tanda negatif jika motor bergerak mundur agar Orange Pi tau arahnya
-  float odomKiri = (modeGerak == 1 || modeGerak == 4 || (modeGerak == 6 && !dirKiriMaju)) ? -rpmKiri : rpmKiri;
-  float odomKanan = (modeGerak == 1 || modeGerak == 5 || (modeGerak == 6 && !dirKananMaju)) ? -rpmKanan : rpmKanan;
+  float odomKiri = (modeGerak == 1 || modeGerak == 5 || (modeGerak == 6 && !dirKiriMaju)) ? -rpmKiri : rpmKiri;
+  float odomKanan = (modeGerak == 1 || modeGerak == 4 || (modeGerak == 6 && !dirKananMaju)) ? -rpmKanan : rpmKanan;
   
   Serial2.print(odomKiri, 1);
   Serial2.print(",");
