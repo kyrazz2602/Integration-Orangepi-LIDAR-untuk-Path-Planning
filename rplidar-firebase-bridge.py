@@ -22,6 +22,7 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
+from action_msgs.msg import GoalStatus
 
 try:
     import firebase_admin
@@ -72,6 +73,9 @@ class RobotFirebaseBridge(Node):
         self.frame_count = 0
         self.publish_interval = 20 # Publish LiDAR every 20 frames
         self.current_odom = None
+        self.last_gerak = None
+        self.last_odom_publish_time = self.get_clock().now()
+        self.odom_publish_interval = 1.0 # seconds
 
         self.get_logger().info('=' * 60)
         self.get_logger().info('Robot Firebase Bridge Started')
@@ -86,14 +90,27 @@ class RobotFirebaseBridge(Node):
             except ValueError:
                 pass
 
-            # Gunakan file JSON yang sudah ada di direktori yang sama dengan script
+            # Cari file JSON kredensial di beberapa lokasi
+            cred_filename = 'airguard-b7ef4-firebase-adminsdk-fbsvc-6361f49d51.json'
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            cred_path = os.path.join(script_dir, 'airguard-b7ef4-firebase-adminsdk-fbsvc-6361f49d51.json')
             
-            if not Path(cred_path).exists():
-                self.get_logger().error(f'Firebase credentials not found at: {cred_path}')
+            paths_to_check = [
+                os.path.join(script_dir, cred_filename), # Lokasi di install space / script dir
+                os.path.join(os.getcwd(), cred_filename), # Lokasi di root workspace saat ini
+                os.path.join(os.path.expanduser('~'), cred_filename), # Lokasi di home directory
+            ]
+            
+            cred_path = None
+            for path in paths_to_check:
+                if Path(path).exists():
+                    cred_path = path
+                    break
+                    
+            if not cred_path:
+                self.get_logger().error(f'Firebase credentials ({cred_filename}) not found in checked paths: {paths_to_check}')
                 return False
 
+            self.get_logger().info(f'Using Firebase credentials from: {cred_path}')
             db_url = os.getenv('FIREBASE_DB_URL') or self.firebase_db_url
             cred = credentials.Certificate(cred_path)
             firebase_admin.initialize_app(cred, {'databaseURL': db_url})
@@ -127,24 +144,28 @@ class RobotFirebaseBridge(Node):
         # Handle Manual Movement (cmd_vel)
         if 'gerak' in command_data:
             gerak = command_data['gerak']
-            twist = Twist()
-            speed = 0.2 # m/s
-            angular_speed = 0.5 # rad/s
-            
-            if gerak == 'MAJU':
-                twist.linear.x = speed
-            elif gerak == 'MUNDUR':
-                twist.linear.x = -speed
-            elif gerak == 'KIRI' or gerak == 'PUTAR_KIRI':
-                twist.angular.z = angular_speed
-            elif gerak == 'KANAN' or gerak == 'PUTAR_KANAN':
-                twist.angular.z = -angular_speed
-            elif gerak == 'DIAM':
-                twist.linear.x = 0.0
-                twist.angular.z = 0.0
+            if gerak != self.last_gerak:
+                self.last_gerak = gerak
+                twist = Twist()
+                speed = 0.2 # m/s
+                angular_speed = 0.5 # rad/s
                 
-            self.cmd_vel_pub.publish(twist)
-            self.get_logger().info(f'Published Manual Twist: {gerak}')
+                if gerak == 'MAJU':
+                    twist.linear.x = speed
+                elif gerak == 'MUNDUR':
+                    twist.linear.x = -speed
+                elif gerak == 'KIRI' or gerak == 'PUTAR_KIRI':
+                    twist.angular.z = angular_speed
+                elif gerak == 'KANAN' or gerak == 'PUTAR_KANAN':
+                    twist.angular.z = -angular_speed
+                elif gerak == 'DIAM':
+                    twist.linear.x = 0.0
+                    twist.angular.z = 0.0
+                    
+                self.cmd_vel_pub.publish(twist)
+                self.get_logger().info(f'Published Manual Twist: {gerak}')
+        else:
+            self.last_gerak = None
 
         # Handle Autonomous Navigation (A* Path Planning)
         if 'goal_x' in command_data and 'goal_y' in command_data:
@@ -161,6 +182,8 @@ class RobotFirebaseBridge(Node):
         self.get_logger().info(f'Sending Nav2 Goal: x={x}, y={y}')
         if not self.nav_to_pose_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error('Nav2 Action Server not available!')
+            if self.firebase_ready:
+                self.db_ref.child('Status').update({'navigation_status': 'SERVER_UNAVAILABLE'})
             return
             
         goal_msg = NavigateToPose.Goal()
@@ -170,12 +193,74 @@ class RobotFirebaseBridge(Node):
         goal_msg.pose.pose.position.y = y
         goal_msg.pose.pose.orientation.w = 1.0 # Facing forward
         
-        self.nav_to_pose_client.send_goal_async(goal_msg)
+        if self.firebase_ready:
+            self.db_ref.child('Status').update({'navigation_status': 'SENDING_GOAL'})
+            
+        send_goal_future = self.nav_to_pose_client.send_goal_async(goal_msg)
+        send_goal_future.add_done_callback(self.goal_response_callback)
+
+    def goal_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().info('Goal rejected :(')
+            if self.firebase_ready:
+                self.db_ref.child('Status').update({'navigation_status': 'REJECTED'})
+            return
+
+        self.get_logger().info('Goal accepted :)')
+        if self.firebase_ready:
+            self.db_ref.child('Status').update({'navigation_status': 'NAVIGATING'})
+            
+        get_result_future = goal_handle.get_result_async()
+        get_result_future.add_done_callback(self.get_result_callback)
+
+    def get_result_callback(self, future):
+        result = future.result()
+        status = result.status
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info('Goal succeeded!')
+            if self.firebase_ready:
+                self.db_ref.child('Status').update({'navigation_status': 'SUCCEEDED'})
+        elif status == GoalStatus.STATUS_ABORTED:
+            self.get_logger().info('Goal aborted!')
+            if self.firebase_ready:
+                self.db_ref.child('Status').update({'navigation_status': 'ABORTED'})
+        elif status == GoalStatus.STATUS_CANCELED:
+            self.get_logger().info('Goal canceled!')
+            if self.firebase_ready:
+                self.db_ref.child('Status').update({'navigation_status': 'CANCELED'})
+        else:
+            self.get_logger().info(f'Goal finished with status code: {status}')
+            if self.firebase_ready:
+                self.db_ref.child('Status').update({'navigation_status': f'FINISHED_CODE_{status}'})
 
     def odom_callback(self, msg: Odometry):
         self.current_odom = msg
-        # Publish status to Firebase every few seconds (optional: throttle this)
-        # self.db_ref.child('Status').update({'rpmKanan': ..., 'rpmKiri': ...})
+        
+        current_time = self.get_clock().now()
+        dt = (current_time - self.last_odom_publish_time).nanoseconds / 1e9
+        if dt >= self.odom_publish_interval:
+            self.last_odom_publish_time = current_time
+            x = msg.pose.pose.position.x
+            y = msg.pose.pose.position.y
+            
+            # Convert quaternion to yaw
+            q = msg.pose.pose.orientation
+            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+            yaw = math.atan2(siny_cosp, cosy_cosp)
+            
+            if self.firebase_ready:
+                try:
+                    self.db_ref.child('Status').update({
+                        'x': round(x, 2),
+                        'y': round(y, 2),
+                        'yaw': round(yaw, 2),
+                        'linear_velocity': round(msg.twist.twist.linear.x, 2),
+                        'angular_velocity': round(msg.twist.twist.angular.z, 2)
+                    })
+                except Exception as e:
+                    self.get_logger().error(f'Firebase odom publish error: {e}')
 
     def scan_callback(self, msg: LaserScan):
         if not self.firebase_ready: return

@@ -11,13 +11,26 @@ def generate_launch_description():
     nav2_bringup_dir = FindPackageShare('nav2_bringup')
     slam_toolbox_dir = FindPackageShare('slam_toolbox')
     
+    # Declare Launch Arguments
+    lidar_port_arg = DeclareLaunchArgument(
+        'lidar_port',
+        default_value='/dev/rplidar' if os.path.exists('/dev/rplidar') else '/dev/ttyUSB0',
+        description='Serial port for RPLidar (e.g. /dev/ttyUSB0 or /dev/ttyS1)'
+    )
+    
+    arduino_port_arg = DeclareLaunchArgument(
+        'arduino_port',
+        default_value='/dev/arduino' if os.path.exists('/dev/arduino') else '/dev/ttyS4',
+        description='Serial port for Arduino Mega (e.g. /dev/ttyUSB1 or /dev/ttyS4)'
+    )
+    
     # 1. RPLidar Node
     rplidar_node = Node(
         package='rplidar_ros',
         executable='rplidar_composition',
         name='rplidar_node',
         parameters=[{
-            'serial_port': '/dev/ttyUSB0', # Adjust if needed
+            'serial_port': LaunchConfiguration('lidar_port'),
             'serial_baudrate': 115200,
             'frame_id': 'laser_link',
             'inverted': False,
@@ -44,7 +57,7 @@ def generate_launch_description():
         executable='arduino_serial_bridge.py',
         name='arduino_bridge',
         parameters=[{
-            'port': '/dev/ttyUSB1', # Arduino Port
+            'port': LaunchConfiguration('arduino_port'), # Arduino Port
             'baudrate': 115200,
             'wheel_radius': 0.033,
             'wheel_base': 0.20
@@ -77,6 +90,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        lidar_port_arg,
+        arduino_port_arg,
         rplidar_node,
         static_tf_node,
         # arduino_bridge_node, # Uncomment when packaged correctly, or run script manually: python3 arduino_serial_bridge.py

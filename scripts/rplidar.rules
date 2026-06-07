@@ -1,4 +1,11 @@
-# set the udev rule , make the device_port be fixed by rplidar
-#
+# set the udev rules for robot hardware interfaces
+
+# RPLidar A1 (Slamtec CP210x) -> /dev/rplidar
 KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", MODE:="0777", SYMLINK+="rplidar"
+
+# Arduino Mega 2560 (Original Atmega16U2) -> /dev/arduino
+KERNEL=="ttyACM*", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0042", MODE:="0777", SYMLINK+="arduino"
+
+# Arduino Mega 2560 Clone (CH340 USB-Serial) -> /dev/arduino
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE:="0777", SYMLINK+="arduino"
 
