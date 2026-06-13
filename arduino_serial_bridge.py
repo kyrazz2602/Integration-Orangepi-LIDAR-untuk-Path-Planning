@@ -20,7 +20,9 @@ class ArduinoBridge(Node):
         super().__init__('arduino_bridge')
         
         # Parameters
-        self.declare_parameter('port', '/dev/arduino')
+        import os
+        default_port = '/dev/arduino' if os.path.exists('/dev/arduino') else '/dev/ttyAS4'
+        self.declare_parameter('port', default_port)
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('wheel_radius', 0.033) # meters (adjust according to your robot)
         self.declare_parameter('wheel_base', 0.20)    # meters (distance between wheels)
@@ -55,21 +57,34 @@ class ArduinoBridge(Node):
         self.read_thread.start()
 
     def cmd_vel_callback(self, msg: Twist):
-        """Convert linear and angular velocities into left and right wheel RPM"""
+        """Convert linear and angular velocities into left and right wheel RPM or discrete commands"""
         v = msg.linear.x
         w = msg.angular.z
         
-        # Kinematics for Differential Drive
-        v_right = v + (w * self.L / 2.0)
-        v_left = v - (w * self.L / 2.0)
-        
-        # Convert m/s to RPM
-        # v = (rpm / 60) * 2 * pi * R  => rpm = (v * 60) / (2 * pi * R)
-        rpm_right = (v_right * 60.0) / (2.0 * math.pi * self.R)
-        rpm_left = (v_left * 60.0) / (2.0 * math.pi * self.R)
-        
-        # Send to Arduino (Format: CMD,VEL,rpmKiri,rpmKanan)
-        command = f"CMD,VEL,{rpm_left:.2f},{rpm_right:.2f}\n"
+        # Check if the command is a discrete movement command (from manual control/Firebase)
+        command = None
+        if math.isclose(v, 0.0, abs_tol=1e-4) and math.isclose(w, 0.0, abs_tol=1e-4):
+            command = "CMD,DIAM\n"
+        elif math.isclose(v, 0.2, abs_tol=1e-4) and math.isclose(w, 0.0, abs_tol=1e-4):
+            command = "CMD,MAJU\n"
+        elif math.isclose(v, -0.2, abs_tol=1e-4) and math.isclose(w, 0.0, abs_tol=1e-4):
+            command = "CMD,MUNDUR\n"
+        elif math.isclose(v, 0.0, abs_tol=1e-4) and math.isclose(w, 0.5, abs_tol=1e-4):
+            command = "CMD,PUTAR_KIRI\n"
+        elif math.isclose(v, 0.0, abs_tol=1e-4) and math.isclose(w, -0.5, abs_tol=1e-4):
+            command = "CMD,PUTAR_KANAN\n"
+            
+        if command is None:
+            # Kinematics for Differential Drive (Fallback for Nav2/continuous speed)
+            v_right = v + (w * self.L / 2.0)
+            v_left = v - (w * self.L / 2.0)
+            
+            # Convert m/s to RPM
+            rpm_right = (v_right * 60.0) / (2.0 * math.pi * self.R)
+            rpm_left = (v_left * 60.0) / (2.0 * math.pi * self.R)
+            
+            command = f"CMD,VEL,{rpm_left:.2f},{rpm_right:.2f}\n"
+
         try:
             self.ser.write(command.encode('utf-8'))
         except Exception as e:

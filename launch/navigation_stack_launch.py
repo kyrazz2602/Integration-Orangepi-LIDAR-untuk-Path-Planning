@@ -23,8 +23,8 @@ def generate_launch_description():
     
     arduino_port_arg = DeclareLaunchArgument(
         'arduino_port',
-        default_value='/dev/arduino' if os.path.exists('/dev/arduino') else '/dev/ttyS4',
-        description='Serial port for Arduino Mega (e.g. /dev/ttyUSB1 or /dev/ttyS4)'
+        default_value='/dev/arduino' if os.path.exists('/dev/arduino') else '/dev/ttyAS4',
+        description='Serial port for Arduino Mega (e.g. /dev/ttyUSB1 or /dev/ttyAS4)'
     )
     
     # 1. RPLidar Node
@@ -65,49 +65,18 @@ def generate_launch_description():
         output='screen'
     )
 
-    # 4. SLAM: GMapping
-    # We use slam_gmapping package to create the Occupancy Grid Map.
-    # Make sure ros-<distro>-slam-gmapping is installed or built in the workspace.
-    slam_gmapping_node = Node(
-        package='slam_gmapping',
-        executable='slam_gmapping',
-        name='slam_gmapping',
-        parameters=[{
-            'use_sim_time': False,
-            'base_frame': 'base_link',
-            'map_frame': 'map',
-            'odom_frame': 'odom',
-            'map_update_interval': 5.0,
-            'maxUrange': 8.0,
-            'sigma': 0.05,
-            'kernelSize': 1,
-            'lstep': 0.05,
-            'astep': 0.05,
-            'iterations': 5,
-            'lsigma': 0.075,
-            'ogain': 3.0,
-            'lskip': 0,
-            'minimumScore': 50.0,
-            'srr': 0.1,
-            'srt': 0.2,
-            'str': 0.1,
-            'stt': 0.2,
-            'linearUpdate': 1.0,
-            'angularUpdate': 0.5,
-            'temporalUpdate': 3.0,
-            'resampleThreshold': 0.5,
-            'particles': 30,
-            'xmin': -10.0,
-            'ymin': -10.0,
-            'xmax': 10.0,
-            'ymax': 10.0,
-            'delta': 0.05,
-            'llsamplerange': 0.01,
-            'llsamplestep': 0.01,
-            'lasamplerange': 0.005,
-            'lasamplestep': 0.005
-        }],
-        output='screen'
+    # 4. SLAM: Slam Toolbox (Async Mapping)
+    slam_toolbox_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('slam_toolbox'),
+                'launch',
+                'online_async_launch.py'
+            ])
+        ),
+        launch_arguments={
+            'use_sim_time': 'false'
+        }.items()
     )
 
     # 5. Nav2 Stack (AMCL Localization, Global Planner A*, Local Planner DWA)
@@ -127,6 +96,7 @@ def generate_launch_description():
         rplidar_node,
         static_tf_node,
         arduino_bridge_node, # Uncomment if arduino is connected
-        slam_gmapping_node,
+        slam_toolbox_launch,
         nav2_launch
     ])
+

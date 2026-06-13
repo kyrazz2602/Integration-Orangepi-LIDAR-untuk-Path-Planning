@@ -9,3 +9,6 @@ KERNEL=="ttyACM*", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0042", MODE:="077
 # Arduino Mega 2560 Clone (CH340 USB-Serial) -> /dev/arduino
 KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE:="0777", SYMLINK+="arduino"
 
+# Orange Pi Hardware UART4 (ttyAS4) -> /dev/arduino
+KERNEL=="ttyAS4", MODE:="0777", SYMLINK+="arduino"
+
