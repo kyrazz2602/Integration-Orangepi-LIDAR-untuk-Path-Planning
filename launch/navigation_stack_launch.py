@@ -66,17 +66,23 @@ def generate_launch_description():
     )
 
     # 4. SLAM: Slam Toolbox (Async Mapping)
-    slam_toolbox_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
+    slam_toolbox_node = Node(
+        package='slam_toolbox',
+        executable='async_slam_toolbox_node',
+        name='slam_toolbox',
+        output='screen',
+        parameters=[
             PathJoinSubstitution([
                 FindPackageShare('slam_toolbox'),
-                'launch',
-                'online_async_launch.py'
-            ])
-        ),
-        launch_arguments={
-            'use_sim_time': 'false'
-        }.items()
+                'config',
+                'mapper_params_online_async.yaml'
+            ]),
+            {
+                'use_sim_time': False,
+                'base_frame': 'base_link',
+                'odom_frame': 'odom'
+            }
+        ]
     )
 
     # 5. Nav2 Stack (AMCL Localization, Global Planner A*, Local Planner DWA)
@@ -96,7 +102,7 @@ def generate_launch_description():
         rplidar_node,
         static_tf_node,
         arduino_bridge_node, # Uncomment if arduino is connected
-        slam_toolbox_launch,
+        slam_toolbox_node,
         nav2_launch
     ])
 

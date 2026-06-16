@@ -67,13 +67,23 @@ def generate_launch_description():
 
     # 4. SLAM Toolbox (Online Sync)
     # Builds the map using /scan and /odom
-    slam_toolbox_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([slam_toolbox_dir, 'launch', 'online_sync_launch.py'])
-        ),
-        launch_arguments={
-            'use_sim_time': 'false'
-        }.items()
+    slam_toolbox_node = Node(
+        package='slam_toolbox',
+        executable='sync_slam_toolbox_node',
+        name='slam_toolbox',
+        output='screen',
+        parameters=[
+            PathJoinSubstitution([
+                FindPackageShare('slam_toolbox'),
+                'config',
+                'mapper_params_online_sync.yaml'
+            ]),
+            {
+                'use_sim_time': False,
+                'base_frame': 'base_link',
+                'odom_frame': 'odom'
+            }
+        ]
     )
 
     # 5. Nav2 Stack
@@ -95,6 +105,6 @@ def generate_launch_description():
         rplidar_node,
         static_tf_node,
         # arduino_bridge_node, # Uncomment when packaged correctly, or run script manually: python3 arduino_serial_bridge.py
-        slam_toolbox_launch,
+        slam_toolbox_node,
         nav2_launch
     ])
