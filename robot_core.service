@@ -10,7 +10,7 @@ User=orangepi
 # Sesuaikan path ini dengan letak direktori rplidar_ros Anda di Orange Pi
 WorkingDirectory=/home/orangepi/ros2_ws/src/rplidar_ros
 # Sesuaikan path ini
-ExecStart=/bin/bash /home/orangepi/ros2_ws/src/rplidar_ros/robot_autostart.sh
+ExecStart=/home/orangepi/ros2_ws/src/rplidar_ros/robot_autostart.sh
 Restart=on-failure
 RestartSec=5
 
