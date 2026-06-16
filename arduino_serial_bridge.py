@@ -38,6 +38,7 @@ class ArduinoBridge(Node):
         self.th = 0.0
         self.last_time = self.get_clock().now()
         self.first_odom = True
+        self.current_cmd_state = "DIAM"
         
         # Setup Serial
         try:
@@ -57,33 +58,32 @@ class ArduinoBridge(Node):
         self.read_thread.start()
 
     def cmd_vel_callback(self, msg: Twist):
-        """Convert linear and angular velocities into left and right wheel RPM or discrete commands"""
+        """Convert linear and angular velocities into discrete commands for Arduino"""
         v = msg.linear.x
         w = msg.angular.z
         
-        # Check if the command is a discrete movement command (from manual control/Firebase)
-        command = None
-        if math.isclose(v, 0.0, abs_tol=1e-4) and math.isclose(w, 0.0, abs_tol=1e-4):
+        # Discretize continuous cmd_vel into the 5 commands supported by the Arduino Mega
+        # Thresholds to avoid jittering when velocities are extremely small
+        linear_threshold = 0.05
+        angular_threshold = 0.1
+        
+        if abs(v) < linear_threshold and abs(w) < angular_threshold:
             command = "CMD,DIAM\n"
-        elif math.isclose(v, 0.2, abs_tol=1e-4) and math.isclose(w, 0.0, abs_tol=1e-4):
-            command = "CMD,MAJU\n"
-        elif math.isclose(v, -0.2, abs_tol=1e-4) and math.isclose(w, 0.0, abs_tol=1e-4):
-            command = "CMD,MUNDUR\n"
-        elif math.isclose(v, 0.0, abs_tol=1e-4) and math.isclose(w, 0.5, abs_tol=1e-4):
-            command = "CMD,PUTAR_KIRI\n"
-        elif math.isclose(v, 0.0, abs_tol=1e-4) and math.isclose(w, -0.5, abs_tol=1e-4):
-            command = "CMD,PUTAR_KANAN\n"
-            
-        if command is None:
-            # Kinematics for Differential Drive (Fallback for Nav2/continuous speed)
-            v_right = v + (w * self.L / 2.0)
-            v_left = v - (w * self.L / 2.0)
-            
-            # Convert m/s to RPM
-            rpm_right = (v_right * 60.0) / (2.0 * math.pi * self.R)
-            rpm_left = (v_left * 60.0) / (2.0 * math.pi * self.R)
-            
-            command = f"CMD,VEL,{rpm_left:.2f},{rpm_right:.2f}\n"
+            self.current_cmd_state = "DIAM"
+        elif abs(v) >= abs(w):
+            if v > 0:
+                command = "CMD,MAJU\n"
+                self.current_cmd_state = "MAJU"
+            else:
+                command = "CMD,MUNDUR\n"
+                self.current_cmd_state = "MUNDUR"
+        else:
+            if w > 0:
+                command = "CMD,KIRI\n"
+                self.current_cmd_state = "KIRI"
+            else:
+                command = "CMD,KANAN\n"
+                self.current_cmd_state = "KANAN"
 
         try:
             self.ser.write(command.encode('utf-8'))
@@ -101,14 +101,36 @@ class ArduinoBridge(Node):
                     continue
                 line = line_bytes.decode('utf-8', errors='ignore').strip()
                 
-                # Format: ODOM,rpmKiri,rpmKanan
+                # Format: ODOM,odomX,odomY,odomTheta,rpmKanan,rpmKiri (6 elements)
                 if line.startswith("ODOM,"):
                     parts = line.split(',')
-                    if len(parts) == 3:
+                    if len(parts) == 6:
+                        # parts[4] is rpmKanan, parts[5] is rpmKiri
+                        rpm_right = float(parts[4])
+                        rpm_left = float(parts[5])
+                        
+                        # Reconstruct signed RPMs based on the last sent command state
+                        if self.current_cmd_state == "MUNDUR":
+                            rpm_left = -rpm_left
+                            rpm_right = -rpm_right
+                        elif self.current_cmd_state == "KIRI":
+                            rpm_left = 0.0
+                            # rpm_right remains positive
+                        elif self.current_cmd_state == "KANAN":
+                            # rpm_left remains positive
+                            rpm_right = 0.0
+                        elif self.current_cmd_state == "DIAM":
+                            rpm_left = 0.0
+                            rpm_right = 0.0
+                            
+                        self.process_odometry(rpm_left, rpm_right)
+                    elif len(parts) == 3:
+                        # Fallback for old format: ODOM,rpmKiri,rpmKanan
                         rpm_left = float(parts[1])
                         rpm_right = float(parts[2])
                         self.process_odometry(rpm_left, rpm_right)
             except Exception as e:
+                self.get_logger().warn(f"Error baca serial: {e}")
                 time.sleep(0.1)
 
     def process_odometry(self, rpm_left, rpm_right):

@@ -154,9 +154,9 @@ class RobotFirebaseBridge(Node):
                     twist.linear.x = speed
                 elif gerak == 'MUNDUR':
                     twist.linear.x = -speed
-                elif gerak == 'KIRI' or gerak == 'PUTAR_KIRI':
+                elif gerak == 'KIRI' or gerak == 'KIRI':
                     twist.angular.z = angular_speed
-                elif gerak == 'KANAN' or gerak == 'PUTAR_KANAN':
+                elif gerak == 'KANAN' or gerak == 'KANAN':
                     twist.angular.z = -angular_speed
                 elif gerak == 'DIAM':
                     twist.linear.x = 0.0
