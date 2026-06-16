@@ -51,6 +51,11 @@ echo "Memulai ROS 2 SLAM & Navigation..."
 ros2 launch rplidar_ros navigation_stack_launch.py &
 ROS_PID=$!
 
+echo "Memulai ROSBridge Websocket Server..."
+# Menjalankan websocket server di background
+ros2 launch rosbridge_server rosbridge_websocket_launch.xml &
+ROSBRIDGE_PID=$!
+
 # Tunggu 5 detik agar Core ROS 2 & Lidar menyala
 sleep 5
 
@@ -59,8 +64,9 @@ echo "Memulai Firebase Bridge..."
 python3 rplidar-firebase-bridge.py &
 FIREBASE_PID=$!
 
-echo "Robot berjalan di background (ROS PID: $ROS_PID, Firebase PID: $FIREBASE_PID)"
+echo "Robot berjalan di background (ROS PID: $ROS_PID, ROSBridge PID: $ROSBRIDGE_PID, Firebase PID: $FIREBASE_PID)"
 
 # Menjaga script tetap hidup
 wait $ROS_PID
+wait $ROSBRIDGE_PID
 wait $FIREBASE_PID
