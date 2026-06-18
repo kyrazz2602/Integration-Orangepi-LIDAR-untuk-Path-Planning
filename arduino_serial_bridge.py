@@ -40,13 +40,13 @@ class ArduinoBridge(Node):
         self.first_odom = True
         self.current_cmd_state = "DIAM"
         
-        # Setup Serial
-        try:
-            self.ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
-            self.get_logger().info(f"Connected to Arduino on {self.port} at {self.baudrate} baud.")
-        except serial.SerialException as e:
-            self.get_logger().error(f"Failed to connect to serial port: {e}")
-            raise SystemExit
+        # Setup Serial Connection & Lock
+        self.serial_lock = threading.Lock()
+        self.ser = None
+        self.connected = False
+        
+        # Attempt initial connection
+        self.connect_serial()
 
         # Publishers & Subscribers
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
@@ -85,17 +85,60 @@ class ArduinoBridge(Node):
                 command = "CMD,KANAN\n"
                 self.current_cmd_state = "KANAN"
 
-        try:
-            self.ser.write(command.encode('utf-8'))
-        except Exception as e:
-            self.get_logger().error(f"Failed to write to serial: {e}")
+        with self.serial_lock:
+            if self.connected and self.ser is not None:
+                try:
+                    self.ser.write(command.encode('utf-8'))
+                except Exception as e:
+                    self.get_logger().error(f"Failed to write to serial: {e}")
+                    self.connected = False
+                    try:
+                        self.ser.close()
+                    except Exception:
+                        pass
+                    self.ser = None
+            else:
+                self.get_logger().warn("Serial not connected, command dropped", throttle_duration_sec=2.0)
+
+    def connect_serial(self):
+        """Try to establish connection with Arduino serial port"""
+        with self.serial_lock:
+            if self.ser is not None:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+            self.connected = False
+            try:
+                self.ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+                self.connected = True
+                self.get_logger().info(f"Connected to Arduino on {self.port} at {self.baudrate} baud.")
+                return True
+            except serial.SerialException as e:
+                self.get_logger().warn(f"Failed to connect to serial port {self.port}: {e}")
+                return False
 
     def serial_read_loop(self):
-        """Read continuous ODOM data from Arduino"""
+        """Read continuous ODOM data from Arduino with auto-reconnection"""
         import time
         while rclpy.ok():
+            if not self.connected:
+                self.get_logger().info("Attempting to reconnect to Arduino serial...")
+                if self.connect_serial():
+                    time.sleep(0.5)
+                else:
+                    time.sleep(2.0)
+                continue
+                
             try:
-                line_bytes = self.ser.readline()
+                # Thread-safe read operation
+                with self.serial_lock:
+                    if self.ser is None:
+                        self.connected = False
+                        continue
+                    line_bytes = self.ser.readline()
+                
                 if not line_bytes:
                     time.sleep(0.01)
                     continue
@@ -130,8 +173,16 @@ class ArduinoBridge(Node):
                         rpm_right = float(parts[2])
                         self.process_odometry(rpm_left, rpm_right)
             except Exception as e:
-                self.get_logger().warn(f"Error baca serial: {e}")
-                time.sleep(0.1)
+                self.get_logger().warn(f"Error reading from serial: {e}")
+                with self.serial_lock:
+                    self.connected = False
+                    if self.ser is not None:
+                        try:
+                            self.ser.close()
+                        except Exception:
+                            pass
+                        self.ser = None
+                time.sleep(1.0)
 
     def process_odometry(self, rpm_left, rpm_right):
         """Calculate x, y, theta based on wheel RPM and publish"""

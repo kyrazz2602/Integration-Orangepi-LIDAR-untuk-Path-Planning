@@ -1,8 +1,31 @@
 #!/bin/bash
 
-# ==========================================
-# Skrip Auto-Start Robot untuk Orange Pi
-# ==========================================
+# Redirect stdout and stderr to a log file
+exec > /tmp/robot_autostart.log 2>&1
+
+echo "=========================================="
+echo "Skrip Auto-Start Robot untuk Orange Pi"
+echo "=========================================="
+echo "Waktu Mulai: $(date)"
+
+# Loop tunggu device /dev/rplidar & /dev/arduino (maks 30 detik)
+echo "Checking for hardware devices..."
+MAX_WAIT=30
+WAIT_TIME=0
+while [ $WAIT_TIME -lt $MAX_WAIT ]; do
+    if [ -e "/dev/rplidar" ] && [ -e "/dev/arduino" ]; then
+        echo "Devices /dev/rplidar and /dev/arduino are ready!"
+        break
+    fi
+    echo "Waiting for devices /dev/rplidar and /dev/arduino... (${WAIT_TIME}/${MAX_WAIT}s)"
+    sleep 1
+    WAIT_TIME=$((WAIT_TIME + 1))
+done
+
+if [ ! -e "/dev/rplidar" ] || [ ! -e "/dev/arduino" ]; then
+    echo "Warning: Timeout waiting for devices. Continuing anyway..."
+    echo "Status: /dev/rplidar exists: $([ -e /dev/rplidar ] && echo 'YES' || echo 'NO'), /dev/arduino exists: $([ -e /dev/arduino ] && echo 'YES' || echo 'NO')"
+fi
 
 # 1. Muat environment ROS 2 (Sesuaikan 'humble' dengan versi ROS 2 Anda jika berbeda)
 if [ -f "/opt/ros/humble/setup.bash" ]; then

@@ -1,6 +1,6 @@
 import os
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -39,6 +39,7 @@ def generate_launch_description():
             'inverted': False,
             'angle_compensate': True,
         }],
+        respawn=True,
         output='screen'
     )
     
@@ -62,6 +63,7 @@ def generate_launch_description():
             'wheel_radius': 0.033,
             'wheel_base': 0.20
         }],
+        respawn=True,
         output='screen'
     )
 
@@ -96,13 +98,25 @@ def generate_launch_description():
         }.items()
     )
 
+    # Wrap SLAM Toolbox with an 8-second delay
+    delayed_slam_toolbox = TimerAction(
+        period=8.0,
+        actions=[slam_toolbox_node]
+    )
+
+    # Wrap Nav2 Stack with a 15-second delay
+    delayed_nav2 = TimerAction(
+        period=15.0,
+        actions=[nav2_launch]
+    )
+
     return LaunchDescription([
         lidar_port_arg,
         arduino_port_arg,
         rplidar_node,
         static_tf_node,
         arduino_bridge_node, # Uncomment if arduino is connected
-        slam_toolbox_node,
-        nav2_launch
+        delayed_slam_toolbox,
+        delayed_nav2
     ])
 

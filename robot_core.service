@@ -1,6 +1,7 @@
 [Unit]
 Description=Robot Autonomous Core (ROS 2 & Firebase)
-After=network.target
+After=network.target systemd-udev-settle.service
+Requires=systemd-udev-settle.service
 Wants=network-online.target
 
 [Service]
@@ -10,6 +11,7 @@ User=orangepi
 # Sesuaikan path ini dengan letak direktori rplidar_ros Anda di Orange Pi
 WorkingDirectory=/home/orangepi/ros2_ws/src/rplidar_ros
 # Sesuaikan path ini
+ExecStartPre=/bin/sleep 10
 ExecStart=/home/orangepi/ros2_ws/src/rplidar_ros/robot_autostart.sh
 Restart=on-failure
 RestartSec=5
