@@ -1,6 +1,6 @@
 import os
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -99,12 +99,18 @@ def generate_launch_description():
         }.items()
     )
 
+    # Menunda peluncuran SLAM dan Nav2 selama 5 detik
+    # agar Arduino dan LiDAR memiliki waktu untuk stabil dan tidak terjadi lonjakan CPU.
+    delayed_slam_and_nav2 = TimerAction(
+        period=5.0,
+        actions=[slam_toolbox_node, nav2_launch]
+    )
+
     return LaunchDescription([
         lidar_port_arg,
         arduino_port_arg,
         rplidar_node,
         static_tf_node,
         # arduino_bridge_node, # Uncomment when packaged correctly, or run script manually: python3 arduino_serial_bridge.py
-        slam_toolbox_node,
-        nav2_launch
+        delayed_slam_and_nav2
     ])
