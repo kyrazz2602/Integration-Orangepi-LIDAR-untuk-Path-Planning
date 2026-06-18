@@ -68,6 +68,28 @@ elif [ -d "../.venv" ] && [ -f "../.venv/bin/activate" ]; then
     echo "Mengaktifkan virtual environment dari folder induk (../.venv)..."
     source ../.venv/bin/activate
 fi
+# ==========================================
+# CLEANUP: Bunuh semua proses lama
+# ==========================================
+echo "[CLEANUP] Membersihkan proses lama..."
+pkill -9 -f "arduino_serial_bridge" 2>/dev/null || true
+pkill -9 -f "rplidar_composition"   2>/dev/null || true
+pkill -9 -f "async_slam_toolbox"    2>/dev/null || true
+pkill -9 -f "nav2"                  2>/dev/null || true
+pkill -9 -f "rosbridge_websocket"   2>/dev/null || true
+pkill -9 -f "rplidar-firebase"      2>/dev/null || true
+
+# Tunggu port benar-benar bebas
+sleep 3
+
+# Verifikasi
+if lsof /dev/ttyAS4 2>/dev/null | grep -q python3; then
+    echo "[WARN] ttyAS4 masih dipegang! Force kill..."
+    fuser -k /dev/ttyAS4 2>/dev/null || true
+    sleep 2
+fi
+
+echo "[OK] Semua proses lama sudah dibersihkan"
 
 echo "Memulai ROS 2 SLAM & Navigation..."
 # Menjalankan launch file di background

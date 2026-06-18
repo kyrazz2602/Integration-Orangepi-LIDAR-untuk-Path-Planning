@@ -26,11 +26,13 @@ class ArduinoBridge(Node):
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('wheel_radius', 0.033) # meters (adjust according to your robot)
         self.declare_parameter('wheel_base', 0.20)    # meters (distance between wheels)
+        self.declare_parameter('reconnect_delay', 5.0)
         
         self.port = self.get_parameter('port').value
         self.baudrate = self.get_parameter('baudrate').value
         self.R = self.get_parameter('wheel_radius').value
         self.L = self.get_parameter('wheel_base').value
+        self.reconnect_delay = self.get_parameter('reconnect_delay').value
         
         # State variables for odometry
         self.x = 0.0
@@ -122,13 +124,16 @@ class ArduinoBridge(Node):
     def serial_read_loop(self):
         """Read continuous ODOM data from Arduino with auto-reconnection"""
         import time
+        error_count = 0
+        MAX_ERRORS = 10
         while rclpy.ok():
             if not self.connected:
                 self.get_logger().info("Attempting to reconnect to Arduino serial...")
                 if self.connect_serial():
+                    error_count = 0
                     time.sleep(0.5)
                 else:
-                    time.sleep(2.0)
+                    time.sleep(self.reconnect_delay)
                 continue
                 
             try:
@@ -167,21 +172,26 @@ class ArduinoBridge(Node):
                             rpm_right = 0.0
                             
                         self.process_odometry(rpm_left, rpm_right)
+                        error_count = 0  # reset errors on successful parse
                     elif len(parts) == 3:
                         # Fallback for old format: ODOM,rpmKiri,rpmKanan
                         rpm_left = float(parts[1])
                         rpm_right = float(parts[2])
                         self.process_odometry(rpm_left, rpm_right)
+                        error_count = 0  # reset errors on successful parse
             except Exception as e:
-                self.get_logger().warn(f"Error reading from serial: {e}")
-                with self.serial_lock:
-                    self.connected = False
-                    if self.ser is not None:
-                        try:
-                            self.ser.close()
-                        except Exception:
-                            pass
-                        self.ser = None
+                error_count += 1
+                self.get_logger().warn(f"Error reading from serial (attempt {error_count}/{MAX_ERRORS}): {e}")
+                if error_count >= MAX_ERRORS:
+                    self.get_logger().error(f"Max serial errors reached ({MAX_ERRORS}). Disconnecting and reconnecting...")
+                    with self.serial_lock:
+                        self.connected = False
+                        if self.ser is not None:
+                            try:
+                                self.ser.close()
+                            except Exception:
+                                pass
+                            self.ser = None
                 time.sleep(1.0)
 
     def process_odometry(self, rpm_left, rpm_right):

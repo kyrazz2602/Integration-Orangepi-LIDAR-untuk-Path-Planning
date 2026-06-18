@@ -1,6 +1,6 @@
 import os
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, TimerAction
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, TimerAction, LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -98,24 +98,39 @@ def generate_launch_description():
         }.items()
     )
 
-    # Wrap SLAM Toolbox with an 8-second delay
-    delayed_slam_toolbox = TimerAction(
-        period=8.0,
-        actions=[slam_toolbox_node]
+    # Wrap Arduino Bridge with a 5-second delay
+    delayed_arduino_bridge = TimerAction(
+        period=5.0,
+        actions=[
+            LogInfo(msg="[STARTUP] LiDAR sudah 5 detik. Menjalankan Arduino bridge..."),
+            arduino_bridge_node,
+        ]
     )
 
-    # Wrap Nav2 Stack with a 15-second delay
+    # Wrap SLAM Toolbox with a 12-second delay
+    delayed_slam_toolbox = TimerAction(
+        period=12.0,
+        actions=[
+            LogInfo(msg="[STARTUP] Menjalankan SLAM Toolbox..."),
+            slam_toolbox_node,
+        ]
+    )
+
+    # Wrap Nav2 Stack with a 20-second delay
     delayed_nav2 = TimerAction(
-        period=15.0,
-        actions=[nav2_launch]
+        period=20.0,
+        actions=[
+            LogInfo(msg="[STARTUP] Menjalankan Nav2 Stack..."),
+            nav2_launch,
+        ]
     )
 
     return LaunchDescription([
         lidar_port_arg,
         arduino_port_arg,
-        rplidar_node,
         static_tf_node,
-        arduino_bridge_node, # Uncomment if arduino is connected
+        rplidar_node,
+        delayed_arduino_bridge,
         delayed_slam_toolbox,
         delayed_nav2
     ])
