@@ -20,8 +20,8 @@ def generate_launch_description():
     
     arduino_port_arg = DeclareLaunchArgument(
         'arduino_port',
-        default_value='/dev/arduino' if os.path.exists('/dev/arduino') else '/dev/ttyS4',
-        description='Serial port for Arduino Mega (e.g. /dev/ttyUSB1 or /dev/ttyS4)'
+        default_value='/dev/arduino' if os.path.exists('/dev/arduino') else '/dev/ttyAS4',
+        description='Serial port for Arduino Mega (e.g. /dev/ttyUSB1 or /dev/ttyAS4)'
     )
     
     # 1. RPLidar Node
