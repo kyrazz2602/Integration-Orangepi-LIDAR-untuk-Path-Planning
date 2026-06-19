@@ -76,6 +76,7 @@ class RobotFirebaseBridge(Node):
         self.last_gerak = None
         self.last_odom_publish_time = self.get_clock().now()
         self.odom_publish_interval = 1.0 # seconds
+        self.goal_handle = None # Track active Nav2 goal pose
 
         self.get_logger().info('=' * 60)
         self.get_logger().info('Robot Firebase Bridge Started')
@@ -131,51 +132,82 @@ class RobotFirebaseBridge(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to start Firebase listener: {e}')
 
+    def cancel_nav_goal(self):
+        """Cancel active Nav2 autonomous navigation goal if any"""
+        if self.goal_handle is not None:
+            self.get_logger().info('Canceling active Nav2 goal due to manual command/STOP...')
+            self.goal_handle.cancel_goal_async()
+            self.goal_handle = None
+    def execute_manual_movement(self, gerak: str):
+        """Processes and publishes twist command to ROS 2 cmd_vel, canceling nav goal if moving"""
+        if gerak != self.last_gerak:
+            self.last_gerak = gerak
+            
+            # Cancel active autonomous goal if a manual control input or STOP is received
+            if gerak in ['MAJU', 'MUNDUR', 'KIRI', 'KANAN', 'DIAM']:
+                self.cancel_nav_goal()
+            
+            twist = Twist()
+            speed = 0.2 # m/s
+            angular_speed = 0.5 # rad/s
+            
+            if gerak == 'MAJU':
+                twist.linear.x = speed
+            elif gerak == 'MUNDUR':
+                twist.linear.x = -speed
+            elif gerak == 'KIRI':
+                twist.angular.z = angular_speed
+            elif gerak == 'KANAN':
+                twist.angular.z = -angular_speed
+            elif gerak == 'DIAM':
+                twist.linear.x = 0.0
+                twist.angular.z = 0.0
+                
+            self.cmd_vel_pub.publish(twist)
+            self.get_logger().info(f'Published Manual Twist: {gerak}')
+
     def _firebase_command_callback(self, event):
         """Triggered when data in /Command changes"""
-        self.get_logger().info(f'Received Firebase Command Update: {event.path} -> {event.data}')
+        path = event.path
+        data = event.data
+        self.get_logger().info(f'Received Firebase Command Update: {path} -> {data}')
         
-        # If the entire Command object is updated or a specific field
-        # For simplicity, we fetch the whole Command object
-        command_data = self.command_ref.get()
-        if not command_data:
+        if data is None:
+            # Ignore deletion events (e.g. when we delete goal_x/goal_y)
             return
 
-        # Handle Manual Movement (cmd_vel)
-        if 'gerak' in command_data:
-            gerak = command_data['gerak']
-            if gerak != self.last_gerak:
-                self.last_gerak = gerak
-                twist = Twist()
-                speed = 0.2 # m/s
-                angular_speed = 0.5 # rad/s
-                
-                if gerak == 'MAJU':
-                    twist.linear.x = speed
-                elif gerak == 'MUNDUR':
-                    twist.linear.x = -speed
-                elif gerak == 'KIRI' or gerak == 'KIRI':
-                    twist.angular.z = angular_speed
-                elif gerak == 'KANAN' or gerak == 'KANAN':
-                    twist.angular.z = -angular_speed
-                elif gerak == 'DIAM':
-                    twist.linear.x = 0.0
-                    twist.angular.z = 0.0
-                    
-                self.cmd_vel_pub.publish(twist)
-                self.get_logger().info(f'Published Manual Twist: {gerak}')
-        else:
-            self.last_gerak = None
+        # 1. Handle explicit change to manual movement command
+        if path == '/gerak':
+            gerak = str(data).upper()
+            self.execute_manual_movement(gerak)
 
-        # Handle Autonomous Navigation (A* Path Planning)
-        if 'goal_x' in command_data and 'goal_y' in command_data:
-            goal_x = float(command_data['goal_x'])
-            goal_y = float(command_data['goal_y'])
-            self.send_nav_goal(goal_x, goal_y)
+        # 2. Handle initial bulk load or specific updates containing goals
+        elif path == '/' and isinstance(data, dict):
+            if 'goal_x' in data and 'goal_y' in data and data['goal_x'] is not None and data['goal_y'] is not None:
+                goal_x = float(data['goal_x'])
+                goal_y = float(data['goal_y'])
+                self.send_nav_goal(goal_x, goal_y)
+                
+                # Clear goal from DB after reading so it doesn't loop
+                self.command_ref.child('goal_x').delete()
+                self.command_ref.child('goal_y').delete()
             
-            # Clear goal from DB after reading so it doesn't loop
-            self.command_ref.child('goal_x').delete()
-            self.command_ref.child('goal_y').delete()
+            if 'gerak' in data and data['gerak'] is not None:
+                gerak = str(data['gerak']).upper()
+                self.execute_manual_movement(gerak)
+
+        # 3. Handle individual goal_x or goal_y updates if they are set separately (fallback)
+        elif path in ['/goal_x', '/goal_y']:
+            command_data = self.command_ref.get()
+            if command_data and 'goal_x' in command_data and 'goal_y' in command_data:
+                if command_data['goal_x'] is not None and command_data['goal_y'] is not None:
+                    goal_x = float(command_data['goal_x'])
+                    goal_y = float(command_data['goal_y'])
+                    self.send_nav_goal(goal_x, goal_y)
+                    
+                    # Clear goal from DB after reading so it doesn't loop
+                    self.command_ref.child('goal_x').delete()
+                    self.command_ref.child('goal_y').delete()
 
     def send_nav_goal(self, x, y):
         """Send goal to Nav2 Action Server"""
@@ -200,9 +232,10 @@ class RobotFirebaseBridge(Node):
         send_goal_future.add_done_callback(self.goal_response_callback)
 
     def goal_response_callback(self, future):
-        goal_handle = future.result()
-        if not goal_handle.accepted:
+        self.goal_handle = future.result()
+        if not self.goal_handle.accepted:
             self.get_logger().info('Goal rejected :(')
+            self.goal_handle = None
             if self.firebase_ready:
                 self.db_ref.child('Status').update({'navigation_status': 'REJECTED'})
             return
@@ -211,10 +244,11 @@ class RobotFirebaseBridge(Node):
         if self.firebase_ready:
             self.db_ref.child('Status').update({'navigation_status': 'NAVIGATING'})
             
-        get_result_future = goal_handle.get_result_async()
+        get_result_future = self.goal_handle.get_result_async()
         get_result_future.add_done_callback(self.get_result_callback)
 
     def get_result_callback(self, future):
+        self.goal_handle = None # Reset active goal reference on completion
         result = future.result()
         status = result.status
         if status == GoalStatus.STATUS_SUCCEEDED:
@@ -250,14 +284,38 @@ class RobotFirebaseBridge(Node):
             cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
             yaw = math.atan2(siny_cosp, cosy_cosp)
             
+            # Calculate motor wheel RPM from linear & angular velocities
+            # using differential drive kinematics matching hardware settings
+            R = 0.033 # wheel radius (meters)
+            L = 0.20  # wheel base (meters)
+            v = msg.twist.twist.linear.x
+            w = msg.twist.twist.angular.z
+            
+            v_left = v - (w * L) / 2.0
+            v_right = v + (w * L) / 2.0
+            
+            rpm_left = (v_left / (2.0 * math.pi * R)) * 60.0
+            rpm_right = (v_right / (2.0 * math.pi * R)) * 60.0
+            
+            # Determine actual movement status based on velocities
+            if abs(v) < 0.015 and abs(w) < 0.05:
+                actual_gerak = 'DIAM'
+            elif abs(v) >= abs(w):
+                actual_gerak = 'MAJU' if v > 0 else 'MUNDUR'
+            else:
+                actual_gerak = 'KIRI' if w > 0 else 'KANAN'
+
             if self.firebase_ready:
                 try:
                     self.db_ref.child('Status').update({
                         'x': round(x, 2),
                         'y': round(y, 2),
                         'yaw': round(yaw, 2),
-                        'linear_velocity': round(msg.twist.twist.linear.x, 2),
-                        'angular_velocity': round(msg.twist.twist.angular.z, 2)
+                        'linear_velocity': round(v, 2),
+                        'angular_velocity': round(w, 2),
+                        'rpmKiri': round(rpm_left, 1),
+                        'rpmKanan': round(rpm_right, 1),
+                        'gerak': actual_gerak
                     })
                 except Exception as e:
                     self.get_logger().error(f'Firebase odom publish error: {e}')
