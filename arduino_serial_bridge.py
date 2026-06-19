@@ -29,7 +29,7 @@ class ArduinoBridge(Node):
         self.declare_parameter('port', default_port)
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('wheel_radius', 0.033) # meters (radius roda)
-        self.declare_parameter('wheel_base', 0.20)    # meters (jarak antar roda) — HARUS sama dengan Arduino
+        self.declare_parameter('wheel_base', 0.07)    # meters (jarak antar roda) — HARUS sama dengan Arduino
         self.declare_parameter('reconnect_delay', 5.0)
         self.declare_parameter('max_rpm', 80.0)       # batas RPM maksimum
         

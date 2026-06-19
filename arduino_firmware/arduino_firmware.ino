@@ -83,7 +83,7 @@ float odomTheta  = 0.0;
 float jarakKanan = 0.0;
 float jarakKiri  = 0.0;
 const float WHEEL_DIAMETER = 6.5;
-const float WHEEL_BASE     = 20.0;  // cm — HARUS sama dengan ROS 2 (0.20 m)
+const float WHEEL_BASE     = 7.0;   // cm — HARUS sama dengan ROS 2 (0.07 m)
 
 // === PID VARIABLE - KANAN ===
 float errorKanan     = 0;

@@ -60,7 +60,7 @@ def generate_launch_description():
             'port': LaunchConfiguration('arduino_port'), # Arduino Port
             'baudrate': 115200,
             'wheel_radius': 0.033,
-            'wheel_base': 0.20
+            'wheel_base': 0.07
         }],
         output='screen'
     )
