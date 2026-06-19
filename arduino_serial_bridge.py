@@ -161,17 +161,24 @@ class ArduinoBridge(Node):
                 if line.startswith("ODOM,"):
                     parts = line.split(',')
                     if len(parts) == 6:
-                        # Signed RPM langsung dari Arduino — tidak perlu rekonstruksi tanda!
-                        rpm_right = float(parts[4])
-                        rpm_left  = float(parts[5])
-                        self.process_odometry(rpm_left, rpm_right)
-                        error_count = 0
+                        try:
+                            x_cm = float(parts[1])
+                            y_cm = float(parts[2])
+                            theta = float(parts[3])
+                            rpm_right = float(parts[4])
+                            rpm_left  = float(parts[5])
+                            self.process_odometry(rpm_left, rpm_right, x_cm, y_cm, theta)
+                            error_count = 0
+                        except ValueError as val_err:
+                            self.get_logger().warn(f"Failed to parse float values: {val_err} in line: {line}")
                     elif len(parts) == 3:
-                        # Fallback untuk format lama: ODOM,rpmKiri,rpmKanan
-                        rpm_left  = float(parts[1])
-                        rpm_right = float(parts[2])
-                        self.process_odometry(rpm_left, rpm_right)
-                        error_count = 0
+                        try:
+                            rpm_left  = float(parts[1])
+                            rpm_right = float(parts[2])
+                            self.process_odometry(rpm_left, rpm_right)
+                            error_count = 0
+                        except ValueError as val_err:
+                            self.get_logger().warn(f"Failed to parse float values: {val_err} in line: {line}")
             except Exception as e:
                 error_count += 1
                 self.get_logger().warn(f"Error reading from serial (attempt {error_count}/{MAX_ERRORS}): {e}")
@@ -185,23 +192,23 @@ class ArduinoBridge(Node):
                             except Exception:
                                 pass
                             self.ser = None
-                time.sleep(1.0)
+                time.sleep(0.05)
 
-    def process_odometry(self, rpm_left, rpm_right):
-        """Calculate x, y, theta from SIGNED wheel RPM and publish odom + TF"""
+    def process_odometry(self, rpm_left, rpm_right, x_cm=None, y_cm=None, theta=None):
+        """Calculate or update x, y, theta and publish odom + TF"""
         current_time = self.get_clock().now()
         
         if self.first_odom:
             self.first_odom = False
             self.last_time = current_time
+            if x_cm is not None:
+                self.x = x_cm / 100.0
+                self.y = y_cm / 100.0
+                self.th = theta
             return
             
         dt = (current_time - self.last_time).nanoseconds / 1e9
         self.last_time = current_time
-        
-        if dt > 1.0:
-            self.get_logger().warning(f"Odom integration gap too large: {dt:.2f}s. Resetting timer.")
-            return
         
         # Convert signed RPM to m/s
         v_left  = (rpm_left  / 60.0) * 2.0 * math.pi * self.R
@@ -211,14 +218,24 @@ class ArduinoBridge(Node):
         v = (v_right + v_left) / 2.0
         w = (v_right - v_left) / self.L
         
-        # Integrate to find position
-        delta_x  = (v * math.cos(self.th)) * dt
-        delta_y  = (v * math.sin(self.th)) * dt
-        delta_th = w * dt
-        
-        self.x  += delta_x
-        self.y  += delta_y
-        self.th += delta_th
+        if x_cm is not None and y_cm is not None and theta is not None:
+            # Use cumulative odometry directly from Arduino (convert cm to meters)
+            self.x = x_cm / 100.0
+            self.y = y_cm / 100.0
+            self.th = theta
+        else:
+            # Fallback to manual integration if Arduino doesn't provide coordinates
+            if dt > 1.0:
+                self.get_logger().warning(f"Odom integration gap too large: {dt:.2f}s. Resetting timer.")
+                return
+            
+            delta_x  = (v * math.cos(self.th)) * dt
+            delta_y  = (v * math.sin(self.th)) * dt
+            delta_th = w * dt
+            
+            self.x  += delta_x
+            self.y  += delta_y
+            self.th += delta_th
         
         # Quaternion from yaw
         q = self.euler_to_quaternion(0, 0, self.th)
