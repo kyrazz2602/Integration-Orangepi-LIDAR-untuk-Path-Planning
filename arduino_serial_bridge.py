@@ -209,7 +209,7 @@ class ArduinoBridge(Node):
                             except Exception:
                                 pass
                             self.ser = None
-                time.sleep(1.0)
+                time.sleep(0.05)
 
     def process_odometry(self, odom_x_cm, odom_y_cm, odom_theta, rpm_left, rpm_right):
         """Publish odom + TF directly from coordinates calculated by Arduino Mega"""
@@ -226,6 +226,7 @@ class ArduinoBridge(Node):
         v = (v_right + v_left) / 2.0
         w = (v_right - v_left) / self.L
         
+
         # Quaternion from yaw
         q = self.euler_to_quaternion(0, 0, self.th)
         

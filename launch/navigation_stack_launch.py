@@ -133,7 +133,7 @@ def generate_launch_description():
 
     # Wrap SLAM Toolbox with a 12-second delay
     delayed_slam_toolbox = TimerAction(
-        period=12.0,
+        period=8.0,
         actions=[
             LogInfo(msg="[STARTUP] Menjalankan SLAM Toolbox..."),
             slam_toolbox_node,
@@ -142,7 +142,7 @@ def generate_launch_description():
 
     # Wrap Nav2 Stack with a 20-second delay
     delayed_nav2 = TimerAction(
-        period=20.0,
+        period=12.0,
         actions=[
             LogInfo(msg="[STARTUP] Menjalankan Nav2 Stack..."),
             nav2_launch,

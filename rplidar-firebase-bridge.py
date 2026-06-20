@@ -287,7 +287,7 @@ class RobotFirebaseBridge(Node):
             # Calculate motor wheel RPM from linear & angular velocities
             # using differential drive kinematics matching hardware settings
             R = 0.033 # wheel radius (meters)
-            L = 0.20  # wheel base (meters)
+            L = 0.07  # wheel base (meters)
             v = msg.twist.twist.linear.x
             w = msg.twist.twist.angular.z
             
