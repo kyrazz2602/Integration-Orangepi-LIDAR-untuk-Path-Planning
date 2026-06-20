@@ -83,7 +83,7 @@ float odomTheta  = 0.0;
 float jarakKanan = 0.0;
 float jarakKiri  = 0.0;
 const float WHEEL_DIAMETER = 6.5;
-const float WHEEL_BASE     = 20.0;  // cm — HARUS sama dengan ROS 2 (0.20 m)
+const float WHEEL_BASE     = 7.0;
 
 // === PID VARIABLE - KANAN ===
 float errorKanan     = 0;
@@ -98,10 +98,6 @@ float lastErrorKiri = 0;
 float integralKiri  = 0;
 float outputKiri    = 0;
 float rpmKiri       = 0;
-
-// === SIGNED RPM (untuk laporan odometri ke ROS 2) ===
-float signedRpmKanan = 0;
-float signedRpmKiri  = 0;
 
 // === KIPAS ===
 int   fanSpeed  = 0;
@@ -119,11 +115,6 @@ const int intervalPID    = 50;
 const int intervalPrint  = 200;
 const int intervalOdom   = 100;
 const int intervalSensor = 100;
-
-// === VELOCITY COMMAND WATCHDOG ===
-unsigned long lastVelCmd  = 0;
-const int velCmdTimeout   = 500;  // ms - auto-stop jika tidak ada CMD,VEL
-bool modeVelCmd           = false;
 
 // === STATUS ===
 bool motorJalan     = false;
@@ -297,42 +288,21 @@ void eksekusiPerintah(String cmd) {
     return;
   }
 
-  if (cmd.startsWith("CMD,VEL,")) {
-    // Format: CMD,VEL,rpmKiri,rpmKanan (signed floats dari ROS 2)
-    String data = cmd.substring(8);
-    int commaIdx = data.indexOf(',');
-    if (commaIdx > 0) {
-      targetRPMKiri  = data.substring(0, commaIdx).toFloat();
-      targetRPMKanan = data.substring(commaIdx + 1).toFloat();
-      // Skalakan feedforward PWM proporsional terhadap target
-      pwmBaseKanan = (targetRPM > 0) ? (abs(targetRPMKanan) / targetRPM) * pwmBase : 0;
-      pwmBaseKiri  = (targetRPM > 0) ? (abs(targetRPMKiri)  / targetRPM) * pwmBase : 0;
-
-      if (abs(targetRPMKiri) < 0.5 && abs(targetRPMKanan) < 0.5) {
-        stopMotor();
-      } else {
-        motorJalan = true;
-        resetPID();
-      }
-      modeVelCmd = true;
-      lastVelCmd = millis();
-    }
-  }
-  else if (cmd == "CMD,MAJU") {
+  if (cmd == "CMD,MAJU") {
     if (blockedDepan()) {
       Serial2.println("EVT:BLOCKED_DEPAN");
       return;
     }
-    motorJalan     = true; modeVelCmd = false;
-    targetRPMKanan = +targetRPM; targetRPMKiri = +targetRPM;
-    pwmBaseKanan   = pwmBase;    pwmBaseKiri   = pwmBase;
+    motorJalan     = true; modeGerak = 0;
+    targetRPMKanan = targetRPM; targetRPMKiri = targetRPM;
+    pwmBaseKanan   = pwmBase;   pwmBaseKiri   = pwmBase;
     resetPID();
     Serial2.println("ACK:MAJU");
   }
   else if (cmd == "CMD,MUNDUR") {
-    motorJalan     = true; modeVelCmd = false;
-    targetRPMKanan = -targetRPM; targetRPMKiri = -targetRPM;
-    pwmBaseKanan   = pwmBase;    pwmBaseKiri   = pwmBase;
+    motorJalan     = true; modeGerak = 1;
+    targetRPMKanan = targetRPM; targetRPMKiri = targetRPM;
+    pwmBaseKanan   = pwmBase;   pwmBaseKiri   = pwmBase;
     resetPID();
     Serial2.println("ACK:MUNDUR");
   }
@@ -341,9 +311,9 @@ void eksekusiPerintah(String cmd) {
       Serial2.println("EVT:BLOCKED_KANAN");
       return;
     }
-    motorJalan     = true; modeVelCmd = false;
-    targetRPMKanan = 0;          targetRPMKiri = +targetRPM;
-    pwmBaseKanan   = 0;          pwmBaseKiri   = pwmBase;
+    motorJalan     = true; modeGerak = 2;
+    targetRPMKanan = 0;       targetRPMKiri = targetRPM;
+    pwmBaseKanan   = 0;       pwmBaseKiri   = pwmBase;
     resetPID();
     Serial2.println("ACK:KANAN");
   }
@@ -352,14 +322,13 @@ void eksekusiPerintah(String cmd) {
       Serial2.println("EVT:BLOCKED_KIRI");
       return;
     }
-    motorJalan     = true; modeVelCmd = false;
-    targetRPMKanan = +targetRPM; targetRPMKiri = 0;
-    pwmBaseKanan   = pwmBase;    pwmBaseKiri   = 0;
+    motorJalan     = true; modeGerak = 3;
+    targetRPMKanan = targetRPM; targetRPMKiri = 0;
+    pwmBaseKanan   = pwmBase;   pwmBaseKiri   = 0;
     resetPID();
     Serial2.println("ACK:KIRI");
   }
   else if (cmd == "CMD,DIAM") {
-    modeVelCmd = false;
     stopMotor();
     Serial2.println("ACK:DIAM");
   }
@@ -453,20 +422,15 @@ void bacaSensorHalangan() {
   if (!motorJalan) return;
 
   bool adaHalangan = false;
-  // Cek depan saat roda bergerak maju
-  bool movingForward = (targetRPMKanan > 0.5) || (targetRPMKiri > 0.5);
-  if (movingForward && blockedDepan()) adaHalangan = true;
-  // Cek samping saat belok
-  bool turningRight = (targetRPMKiri > 0.5) && (targetRPMKanan < -0.5);
-  if (turningRight && blockedKanan()) adaHalangan = true;
-  bool turningLeft = (targetRPMKanan > 0.5) && (targetRPMKiri < -0.5);
-  if (turningLeft && blockedKiri()) adaHalangan = true;
+  if (modeGerak == 0 && blockedDepan())  adaHalangan = true;
+  if (modeGerak == 2 && blockedKanan())  adaHalangan = true;
+  if (modeGerak == 3 && blockedKiri())   adaHalangan = true;
 
   if (!adaHalangan) return;
 
   stopMotor();
-  if (modeVelCmd) Serial2.println("EVT:OBSTACLE_OTONOM");
-  else            Serial2.println("EVT:OBSTACLE_STOP");
+  if (modeOperasi == MODE_MANUAL)      Serial2.println("EVT:OBSTACLE_STOP");
+  else if (modeOperasi == MODE_OTONOM) Serial2.println("EVT:OBSTACLE_OTONOM");
 }
 
 // ============================================
@@ -503,28 +467,29 @@ void setMotorKiri(int pwm, bool maju) {
 // GERAKKAN MOTOR
 // ============================================
 void gerakkanMotor() {
-  // === RODA KIRI: arah ditentukan dari tanda targetRPMKiri ===
-  if (abs(targetRPMKiri) < 0.5) {
-    analogWrite(RPWM_KIRI, 0);
-    analogWrite(LPWM_KIRI, 0);
-    outputKiri = 0;
-    integralKiri = 0;
-  } else {
-    bool majuKiri = (targetRPMKiri > 0);
-    outputKiri = hitungPID(abs(targetRPMKiri), rpmKiri, integralKiri, lastErrorKiri, errorKiri, pwmBaseKiri);
-    setMotorKiri((int)outputKiri, majuKiri);
-  }
-
-  // === RODA KANAN: arah ditentukan dari tanda targetRPMKanan ===
-  if (abs(targetRPMKanan) < 0.5) {
-    analogWrite(RPWM_KANAN, 0);
-    analogWrite(LPWM_KANAN, 0);
-    outputKanan = 0;
-    integralKanan = 0;
-  } else {
-    bool majuKanan = (targetRPMKanan > 0);
-    outputKanan = hitungPID(abs(targetRPMKanan), rpmKanan, integralKanan, lastErrorKanan, errorKanan, pwmBaseKanan);
-    setMotorKanan((int)outputKanan, majuKanan);
+  switch (modeGerak) {
+    case 0:
+      outputKanan = hitungPID(targetRPMKanan, rpmKanan, integralKanan, lastErrorKanan, errorKanan, pwmBaseKanan);
+      outputKiri  = hitungPID(targetRPMKiri,  rpmKiri,  integralKiri,  lastErrorKiri,  errorKiri,  pwmBaseKiri);
+      setMotorKanan((int)outputKanan, true);
+      setMotorKiri ((int)outputKiri,  true);
+      break;
+    case 1:
+      outputKanan = hitungPID(targetRPMKanan, rpmKanan, integralKanan, lastErrorKanan, errorKanan, pwmBaseKanan);
+      outputKiri  = hitungPID(targetRPMKiri,  rpmKiri,  integralKiri,  lastErrorKiri,  errorKiri,  pwmBaseKiri);
+      setMotorKanan((int)outputKanan, false);
+      setMotorKiri ((int)outputKiri,  false);
+      break;
+    case 2:
+      outputKiri = hitungPID(targetRPMKiri, rpmKiri, integralKiri, lastErrorKiri, errorKiri, pwmBaseKiri);
+      setMotorKanan(0, true);
+      setMotorKiri ((int)outputKiri, true);
+      break;
+    case 3:
+      outputKanan = hitungPID(targetRPMKanan, rpmKanan, integralKanan, lastErrorKanan, errorKanan, pwmBaseKanan);
+      setMotorKanan((int)outputKanan, true);
+      setMotorKiri (0, true);
+      break;
   }
 }
 
@@ -535,9 +500,9 @@ void updateOdometri(long pK, long pL) {
   float dK = (abs(pK) / PPR) * (PI * WHEEL_DIAMETER);
   float dL = (abs(pL) / PPR) * (PI * WHEEL_DIAMETER);
 
-  // Tanda arah ditentukan dari target RPM (bukan modeGerak)
-  if (targetRPMKanan < -0.5) dK = -dK;
-  if (targetRPMKiri  < -0.5) dL = -dL;
+  if (modeGerak == 1) { dK = -dK; dL = -dL; }
+  if (modeGerak == 2) { dK = 0; }
+  if (modeGerak == 3) { dL = 0; }
 
   jarakKanan += dK;
   jarakKiri  += dL;
@@ -554,16 +519,12 @@ void updateOdometri(long pK, long pL) {
 // KIRIM ODOMETRI KE ORANGE PI
 // ============================================
 void kirimOdometri() {
-  // Kirim signed RPM berdasarkan arah target
-  signedRpmKanan = (targetRPMKanan < -0.5) ? -rpmKanan : rpmKanan;
-  signedRpmKiri  = (targetRPMKiri  < -0.5) ? -rpmKiri  : rpmKiri;
-
   Serial2.print("ODOM,");
-  Serial2.print(odomX,          2); Serial2.print(",");
-  Serial2.print(odomY,          2); Serial2.print(",");
-  Serial2.print(odomTheta,      4); Serial2.print(",");
-  Serial2.print(signedRpmKanan, 1); Serial2.print(",");
-  Serial2.println(signedRpmKiri, 1);
+  Serial2.print(odomX,     2); Serial2.print(",");
+  Serial2.print(odomY,     2); Serial2.print(",");
+  Serial2.print(odomTheta, 4); Serial2.print(",");
+  Serial2.print(rpmKanan,  1); Serial2.print(",");
+  Serial2.println(rpmKiri, 1);
 }
 
 // ============================================
@@ -665,12 +626,5 @@ void loop() {
   if (now - lastOdom >= intervalOdom) {
     lastOdom = now;
     kirimOdometri();
-  }
-
-  // === WATCHDOG: Auto-stop jika tidak ada CMD,VEL selama velCmdTimeout ===
-  if (modeVelCmd && motorJalan && (now - lastVelCmd >= (unsigned long)velCmdTimeout)) {
-    stopMotor();
-    modeVelCmd = false;
-    Serial2.println("EVT:VEL_TIMEOUT");
   }
 }

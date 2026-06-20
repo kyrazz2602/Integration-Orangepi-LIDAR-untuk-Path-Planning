@@ -52,6 +52,30 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Static TF for Front Ultrasonic
+    tf_us_depan = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        arguments=['0.15', '0.0', '0.1', '0.0', '0.0', '0.0', 'base_link', 'ultrasonic_depan_link'],
+        output='screen'
+    )
+
+    # Static TF for Left Ultrasonic (rotated 90 degrees around Z = 1.5708 rad)
+    tf_us_kiri = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        arguments=['0.0', '0.1', '0.1', '1.5708', '0.0', '0.0', 'base_link', 'ultrasonic_kiri_link'],
+        output='screen'
+    )
+
+    # Static TF for Right Ultrasonic (rotated -90 degrees around Z = -1.5708 rad)
+    tf_us_kanan = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        arguments=['0.0', '-0.1', '0.1', '-1.5708', '0.0', '0.0', 'base_link', 'ultrasonic_kanan_link'],
+        output='screen'
+    )
+
     # 3. Arduino Serial Bridge (Hardware Odometry/Motor Control)
     arduino_bridge_node = Node(
         package='rplidar_ros',
@@ -60,8 +84,8 @@ def generate_launch_description():
         parameters=[{
             'port': LaunchConfiguration('arduino_port'),
             'baudrate': 115200,
-            'wheel_radius': 0.033,
-            'wheel_base': 0.20
+            'wheel_radius': 0.0325,
+            'wheel_base': 0.07
         }],
         respawn=True,
         output='screen'
@@ -125,13 +149,33 @@ def generate_launch_description():
         ]
     )
 
+    # 6. Room Map Manager
+    room_map_manager_node = Node(
+        package='rplidar_ros',
+        executable='room_map_manager.py',
+        name='room_map_manager',
+        output='screen'
+    )
+
+    delayed_room_map_manager = TimerAction(
+        period=14.0,  # Start after slam_toolbox (12.0s) but before nav2 finishes (20.0s)
+        actions=[
+            LogInfo(msg="[STARTUP] Menjalankan Room Map Manager..."),
+            room_map_manager_node,
+        ]
+    )
+
     return LaunchDescription([
         lidar_port_arg,
         arduino_port_arg,
         static_tf_node,
+        tf_us_depan,
+        tf_us_kiri,
+        tf_us_kanan,
         rplidar_node,
         delayed_arduino_bridge,
         delayed_slam_toolbox,
+        delayed_room_map_manager,
         delayed_nav2
     ])
 

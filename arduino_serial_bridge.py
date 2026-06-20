@@ -17,6 +17,7 @@ import serial
 import threading
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Range
 from tf2_ros import TransformBroadcaster
 
 class ArduinoBridge(Node):
@@ -28,8 +29,8 @@ class ArduinoBridge(Node):
         default_port = '/dev/arduino' if os.path.exists('/dev/arduino') else '/dev/ttyAS4'
         self.declare_parameter('port', default_port)
         self.declare_parameter('baudrate', 115200)
-        self.declare_parameter('wheel_radius', 0.033) # meters (radius roda)
-        self.declare_parameter('wheel_base', 0.20)    # meters (jarak antar roda) — HARUS sama dengan Arduino
+        self.declare_parameter('wheel_radius', 0.0325) # meters (radius roda)
+        self.declare_parameter('wheel_base', 0.07)    # meters (jarak antar roda) — HARUS sama dengan Arduino
         self.declare_parameter('reconnect_delay', 5.0)
         self.declare_parameter('max_rpm', 80.0)       # batas RPM maksimum
         
@@ -61,6 +62,13 @@ class ArduinoBridge(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
         self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
         
+        # Range Sensor Publishers
+        self.range_pubs = {
+            'depan': self.create_publisher(Range, '/ultrasonic/depan', 10),
+            'kiri':  self.create_publisher(Range, '/ultrasonic/kiri', 10),
+            'kanan': self.create_publisher(Range, '/ultrasonic/kanan', 10),
+        }
+        
         # Timer: re-send CMD,VEL at 10Hz untuk menjaga watchdog Arduino
         self.vel_timer = self.create_timer(0.1, self.vel_timer_callback)
         
@@ -78,29 +86,29 @@ class ArduinoBridge(Node):
         self._send_vel_command(self.last_cmd_vel)
 
     def _send_vel_command(self, msg: Twist):
-        """Convert Twist to per-wheel RPM using differential drive kinematics
-        and send CMD,VEL,rpmKiri,rpmKanan to Arduino"""
-        v = msg.linear.x   # m/s
-        w = msg.angular.z   # rad/s
+        """Convert Twist to discrete movement commands for the new Arduino firmware"""
+        v = msg.linear.x    # m/s
+        w = msg.angular.z    # rad/s
         
-        # Differential drive inverse kinematics
-        v_left  = v - (w * self.L) / 2.0
-        v_right = v + (w * self.L) / 2.0
+        # Thresholds
+        v_thresh = 0.03
+        w_thresh = 0.08
         
-        # Convert m/s to RPM: RPM = (v / (2π * R)) * 60
-        rpm_left  = (v_left  / (2.0 * math.pi * self.R)) * 60.0
-        rpm_right = (v_right / (2.0 * math.pi * self.R)) * 60.0
-        
-        # Clamp to max RPM for safety
-        rpm_left  = max(-self.max_rpm, min(self.max_rpm, rpm_left))
-        rpm_right = max(-self.max_rpm, min(self.max_rpm, rpm_right))
-        
-        command = f"CMD,VEL,{rpm_left:.1f},{rpm_right:.1f}\n"
-        
+        if v > v_thresh:
+            cmd_str = "CMD,MAJU\n"
+        elif v < -v_thresh:
+            cmd_str = "CMD,MUNDUR\n"
+        elif w > w_thresh:
+            cmd_str = "CMD,KIRI\n"
+        elif w < -w_thresh:
+            cmd_str = "CMD,KANAN\n"
+        else:
+            cmd_str = "CMD,DIAM\n"
+            
         with self.serial_lock:
             if self.connected and self.ser is not None:
                 try:
-                    self.ser.write(command.encode('utf-8'))
+                    self.ser.write(cmd_str.encode('utf-8'))
                 except Exception as e:
                     self.get_logger().error(f"Failed to write to serial: {e}")
                     self.connected = False
@@ -157,21 +165,37 @@ class ArduinoBridge(Node):
                     continue
                 line = line_bytes.decode('utf-8', errors='ignore').strip()
                 
-                # Format: ODOM,odomX,odomY,odomTheta,signedRpmKanan,signedRpmKiri
+                # Format: ODOM,odomX,odomY,odomTheta,rpmKanan,rpmKiri
                 if line.startswith("ODOM,"):
                     parts = line.split(',')
                     if len(parts) == 6:
-                        # Signed RPM langsung dari Arduino — tidak perlu rekonstruksi tanda!
-                        rpm_right = float(parts[4])
-                        rpm_left  = float(parts[5])
-                        self.process_odometry(rpm_left, rpm_right)
-                        error_count = 0
-                    elif len(parts) == 3:
-                        # Fallback untuk format lama: ODOM,rpmKiri,rpmKanan
-                        rpm_left  = float(parts[1])
-                        rpm_right = float(parts[2])
-                        self.process_odometry(rpm_left, rpm_right)
-                        error_count = 0
+                        try:
+                            odom_x = float(parts[1])
+                            odom_y = float(parts[2])
+                            odom_theta = float(parts[3])
+                            rpm_right = float(parts[4])
+                            rpm_left  = float(parts[5])
+                            self.process_odometry(odom_x, odom_y, odom_theta, rpm_left, rpm_right)
+                            error_count = 0
+                        except ValueError as e:
+                            self.get_logger().error(f"Error parsing ODOM line: {e} from: {line}")
+                elif line.startswith("SENSOR,"):
+                    parts = line.split(',')
+                    if len(parts) >= 4:
+                        try:
+                            # SENSOR,jarakDepan,jarakKiri,jarakKanan,irKiri,irTengah,irKanan
+                            jarak_depan = float(parts[1])
+                            jarak_kiri  = float(parts[2])
+                            jarak_kanan = float(parts[3])
+                            self.publish_range('depan', jarak_depan)
+                            self.publish_range('kiri', jarak_kiri)
+                            self.publish_range('kanan', jarak_kanan)
+                            error_count = 0
+                        except ValueError as e:
+                            self.get_logger().error(f"Error parsing SENSOR line: {e} from: {line}")
+                elif line.startswith("EVT:OBSTACLE"):
+                    self.get_logger().warn(f"Hardware safety stop triggered: {line}")
+                    error_count = 0
             except Exception as e:
                 error_count += 1
                 self.get_logger().warn(f"Error reading from serial (attempt {error_count}/{MAX_ERRORS}): {e}")
@@ -187,38 +211,20 @@ class ArduinoBridge(Node):
                             self.ser = None
                 time.sleep(1.0)
 
-    def process_odometry(self, rpm_left, rpm_right):
-        """Calculate x, y, theta from SIGNED wheel RPM and publish odom + TF"""
+    def process_odometry(self, odom_x_cm, odom_y_cm, odom_theta, rpm_left, rpm_right):
+        """Publish odom + TF directly from coordinates calculated by Arduino Mega"""
         current_time = self.get_clock().now()
         
-        if self.first_odom:
-            self.first_odom = False
-            self.last_time = current_time
-            return
-            
-        dt = (current_time - self.last_time).nanoseconds / 1e9
-        self.last_time = current_time
+        # Convert cm to meters
+        self.x = odom_x_cm / 100.0
+        self.y = odom_y_cm / 100.0
+        self.th = odom_theta
         
-        if dt > 1.0:
-            self.get_logger().warning(f"Odom integration gap too large: {dt:.2f}s. Resetting timer.")
-            return
-        
-        # Convert signed RPM to m/s
+        # Calculate linear and angular velocities from wheel RPM for status reporting
         v_left  = (rpm_left  / 60.0) * 2.0 * math.pi * self.R
         v_right = (rpm_right / 60.0) * 2.0 * math.pi * self.R
-        
-        # Differential drive forward kinematics
         v = (v_right + v_left) / 2.0
         w = (v_right - v_left) / self.L
-        
-        # Integrate to find position
-        delta_x  = (v * math.cos(self.th)) * dt
-        delta_y  = (v * math.sin(self.th)) * dt
-        delta_th = w * dt
-        
-        self.x  += delta_x
-        self.y  += delta_y
-        self.th += delta_th
         
         # Quaternion from yaw
         q = self.euler_to_quaternion(0, 0, self.th)
@@ -255,6 +261,24 @@ class ArduinoBridge(Node):
         odom.twist.twist.angular.z = w
         
         self.odom_pub.publish(odom)
+
+    def publish_range(self, name: str, distance_cm: float):
+        msg = Range()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = f'ultrasonic_{name}_link'
+        msg.radiation_type = Range.ULTRASOUND
+        msg.field_of_view = 0.26  # ~15 degrees
+        msg.min_range = 0.02
+        msg.max_range = 4.0
+        
+        # 999.0 indicates out of range or no reading
+        val = distance_cm / 100.0
+        if val > 4.0 or val < 0.0:
+            msg.range = float('inf')
+        else:
+            msg.range = val
+            
+        self.range_pubs[name].publish(msg)
 
     @staticmethod
     def euler_to_quaternion(roll, pitch, yaw):

@@ -87,6 +87,7 @@ install(DIRECTORY launch rviz config
 install(PROGRAMS
   arduino_serial_bridge.py
   rplidar-firebase-bridge.py
+  room_map_manager.py
   airguard-b7ef4-firebase-adminsdk-fbsvc-6361f49d51.json
   DESTINATION lib/${PROJECT_NAME}
 )
