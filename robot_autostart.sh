@@ -1,8 +1,31 @@
 #!/bin/bash
 
-# ==========================================
-# Skrip Auto-Start Robot untuk Orange Pi
-# ==========================================
+# Redirect stdout and stderr to a log file
+exec > /tmp/robot_autostart.log 2>&1
+
+echo "=========================================="
+echo "Skrip Auto-Start Robot untuk Orange Pi"
+echo "=========================================="
+echo "Waktu Mulai: $(date)"
+
+# Loop tunggu device /dev/rplidar & /dev/arduino (maks 30 detik)
+echo "Checking for hardware devices..."
+MAX_WAIT=30
+WAIT_TIME=0
+while [ $WAIT_TIME -lt $MAX_WAIT ]; do
+    if [ -e "/dev/rplidar" ] && [ -e "/dev/arduino" ]; then
+        echo "Devices /dev/rplidar and /dev/arduino are ready!"
+        break
+    fi
+    echo "Waiting for devices /dev/rplidar and /dev/arduino... (${WAIT_TIME}/${MAX_WAIT}s)"
+    sleep 1
+    WAIT_TIME=$((WAIT_TIME + 1))
+done
+
+if [ ! -e "/dev/rplidar" ] || [ ! -e "/dev/arduino" ]; then
+    echo "Warning: Timeout waiting for devices. Continuing anyway..."
+    echo "Status: /dev/rplidar exists: $([ -e /dev/rplidar ] && echo 'YES' || echo 'NO'), /dev/arduino exists: $([ -e /dev/arduino ] && echo 'YES' || echo 'NO')"
+fi
 
 # 1. Muat environment ROS 2 (Sesuaikan 'humble' dengan versi ROS 2 Anda jika berbeda)
 if [ -f "/opt/ros/humble/setup.bash" ]; then
@@ -45,11 +68,38 @@ elif [ -d "../.venv" ] && [ -f "../.venv/bin/activate" ]; then
     echo "Mengaktifkan virtual environment dari folder induk (../.venv)..."
     source ../.venv/bin/activate
 fi
+# ==========================================
+# CLEANUP: Bunuh semua proses lama
+# ==========================================
+echo "[CLEANUP] Membersihkan proses lama..."
+pkill -9 -f "arduino_serial_bridge" 2>/dev/null || true
+pkill -9 -f "rplidar_composition"   2>/dev/null || true
+pkill -9 -f "async_slam_toolbox"    2>/dev/null || true
+pkill -9 -f "nav2"                  2>/dev/null || true
+pkill -9 -f "rosbridge_websocket"   2>/dev/null || true
+pkill -9 -f "rplidar-firebase"      2>/dev/null || true
+
+# Tunggu port benar-benar bebas
+sleep 3
+
+# Verifikasi
+if lsof /dev/ttyAS4 2>/dev/null | grep -q python3; then
+    echo "[WARN] ttyAS4 masih dipegang! Force kill..."
+    fuser -k /dev/ttyAS4 2>/dev/null || true
+    sleep 2
+fi
+
+echo "[OK] Semua proses lama sudah dibersihkan"
 
 echo "Memulai ROS 2 SLAM & Navigation..."
 # Menjalankan launch file di background
 ros2 launch rplidar_ros navigation_stack_launch.py &
 ROS_PID=$!
+
+echo "Memulai ROSBridge Websocket Server..."
+# Menjalankan websocket server di background
+ros2 launch rosbridge_server rosbridge_websocket_launch.xml &
+ROSBRIDGE_PID=$!
 
 # Tunggu 5 detik agar Core ROS 2 & Lidar menyala
 sleep 5
@@ -59,8 +109,9 @@ echo "Memulai Firebase Bridge..."
 python3 rplidar-firebase-bridge.py &
 FIREBASE_PID=$!
 
-echo "Robot berjalan di background (ROS PID: $ROS_PID, Firebase PID: $FIREBASE_PID)"
+echo "Robot berjalan di background (ROS PID: $ROS_PID, ROSBridge PID: $ROSBRIDGE_PID, Firebase PID: $FIREBASE_PID)"
 
 # Menjaga script tetap hidup
 wait $ROS_PID
+wait $ROSBRIDGE_PID
 wait $FIREBASE_PID
