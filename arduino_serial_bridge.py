@@ -15,6 +15,7 @@ import rclpy
 from rclpy.node import Node
 import serial
 import threading
+import subprocess
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
@@ -172,6 +173,13 @@ class ArduinoBridge(Node):
                         rpm_right = float(parts[2])
                         self.process_odometry(rpm_left, rpm_right)
                         error_count = 0
+                elif line.startswith("WIFI,") or line.startswith("wifi,"):
+                    parts = line.split(',', 2)
+                    if len(parts) == 3:
+                        ssid = parts[1]
+                        password = parts[2]
+                        self.get_logger().info(f"Received WiFi connection request from ESP32: SSID={ssid}")
+                        self.change_wifi(ssid, password)
             except Exception as e:
                 error_count += 1
                 self.get_logger().warn(f"Error reading from serial (attempt {error_count}/{MAX_ERRORS}): {e}")
@@ -255,6 +263,25 @@ class ArduinoBridge(Node):
         odom.twist.twist.angular.z = w
         
         self.odom_pub.publish(odom)
+
+    def change_wifi(self, ssid, password):
+        """Automatically switch WiFi connection using nmcli in a separate thread"""
+        def run_nmcli():
+            self.get_logger().info(f"Connecting to WiFi SSID: '{ssid}'...")
+            cmd = ["nmcli", "device", "wifi", "connect", ssid, "password", password]
+            try:
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
+                if res.returncode == 0:
+                    self.get_logger().info(f"Successfully connected to WiFi SSID: '{ssid}'")
+                else:
+                    self.get_logger().error(f"Failed to connect to WiFi SSID: '{ssid}'. Error: {res.stderr.strip()}")
+            except subprocess.TimeoutExpired:
+                self.get_logger().error(f"Timeout expired while connecting to WiFi SSID: '{ssid}'")
+            except Exception as e:
+                self.get_logger().error(f"Error executing nmcli command: {e}")
+
+        # Run in background daemon thread to avoid blocking ROS execution or serial reader
+        threading.Thread(target=run_nmcli, daemon=True).start()
 
     @staticmethod
     def euler_to_quaternion(roll, pitch, yaw):

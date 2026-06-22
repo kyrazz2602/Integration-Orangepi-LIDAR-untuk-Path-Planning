@@ -412,6 +412,14 @@ void bacaESP32() {
   if (input.length() == 0) return;
   sumberPerintah = 2;
   Serial.println("[ESP] " + input);
+  
+  // Forward WiFi credentials from ESP32 to Orange Pi without forcing uppercase
+  if (input.startsWith("WIFI,") || input.startsWith("wifi,")) {
+    Serial.println("[FORWARD WIFI] Forwarding to Orange Pi: " + input);
+    Serial2.println(input);
+    return;
+  }
+  
   eksekusiPerintah(input);  // langsung full routing, bukan cuma kipas
 }
 
