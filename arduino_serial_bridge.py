@@ -79,25 +79,25 @@ class ArduinoBridge(Node):
         self._send_vel_command(self.last_cmd_vel)
 
     def _send_vel_command(self, msg: Twist):
-        """Convert Twist to per-wheel RPM using differential drive kinematics
-        and send CMD,VEL,rpmKiri,rpmKanan to Arduino"""
+        """Convert Twist to discrete movement commands for Arduino Mega"""
         v = msg.linear.x   # m/s
-        w = msg.angular.z   # rad/s
+        w = msg.angular.z  # rad/s
         
-        # Differential drive inverse kinematics
-        v_left  = v - (w * self.L) / 2.0
-        v_right = v + (w * self.L) / 2.0
+        # Thresholds to distinguish noise from intentional commands
+        linear_threshold = 0.02
+        angular_threshold = 0.05
         
-        # Convert m/s to RPM: RPM = (v / (2π * R)) * 60
-        rpm_left  = (v_left  / (2.0 * math.pi * self.R)) * 60.0
-        rpm_right = (v_right / (2.0 * math.pi * self.R)) * 60.0
-        
-        # Clamp to max RPM for safety
-        rpm_left  = max(-self.max_rpm, min(self.max_rpm, rpm_left))
-        rpm_right = max(-self.max_rpm, min(self.max_rpm, rpm_right))
-        
-        command = f"CMD,VEL,{rpm_left:.1f},{rpm_right:.1f}\n"
-        
+        if v > linear_threshold:
+            command = "CMD,MAJU\n"
+        elif v < -linear_threshold:
+            command = "CMD,MUNDUR\n"
+        elif w > angular_threshold:
+            command = "CMD,KIRI\n"
+        elif w < -angular_threshold:
+            command = "CMD,KANAN\n"
+        else:
+            command = "CMD,DIAM\n"
+            
         with self.serial_lock:
             if self.connected and self.ser is not None:
                 try:
@@ -158,21 +158,20 @@ class ArduinoBridge(Node):
                     continue
                 line = line_bytes.decode('utf-8', errors='ignore').strip()
                 
-                # Format: ODOM,odomX,odomY,odomTheta,signedRpmKanan,signedRpmKiri
+                # Format: ODOM,odomX,odomY,odomTheta,rpmKanan,rpmKiri
                 if line.startswith("ODOM,"):
                     parts = line.split(',')
                     if len(parts) == 6:
-                        # Signed RPM langsung dari Arduino — tidak perlu rekonstruksi tanda!
-                        rpm_right = float(parts[4])
-                        rpm_left  = float(parts[5])
-                        self.process_odometry(rpm_left, rpm_right)
-                        error_count = 0
-                    elif len(parts) == 3:
-                        # Fallback untuk format lama: ODOM,rpmKiri,rpmKanan
-                        rpm_left  = float(parts[1])
-                        rpm_right = float(parts[2])
-                        self.process_odometry(rpm_left, rpm_right)
-                        error_count = 0
+                        try:
+                            odom_x = float(parts[1]) / 100.0  # Convert cm to meters
+                            odom_y = float(parts[2]) / 100.0  # Convert cm to meters
+                            odom_theta = float(parts[3])
+                            rpm_kanan = float(parts[4])
+                            rpm_kiri = float(parts[5])
+                            self.process_direct_odometry(odom_x, odom_y, odom_theta, rpm_kiri, rpm_kanan)
+                            error_count = 0
+                        except ValueError as e:
+                            self.get_logger().warn(f"Failed to parse ODOM line '{line}': {e}")
                 elif line.startswith("WIFI,") or line.startswith("wifi,"):
                     parts = line.split(',', 2)
                     if len(parts) == 3:
@@ -195,49 +194,44 @@ class ArduinoBridge(Node):
                             self.ser = None
                 time.sleep(1.0)
 
-    def process_odometry(self, rpm_left, rpm_right):
-        """Calculate x, y, theta from SIGNED wheel RPM and publish odom + TF"""
+    def process_direct_odometry(self, odom_x, odom_y, odom_theta, rpm_left, rpm_right):
+        """Publish odom and TF using direct pre-integrated odometry from Arduino Mega"""
         current_time = self.get_clock().now()
         
-        if self.first_odom:
-            self.first_odom = False
-            self.last_time = current_time
-            return
+        # Determine signs based on last cmd_vel
+        last_v = self.last_cmd_vel.linear.x
+        last_w = self.last_cmd_vel.angular.z
+        
+        v_sign = 1.0
+        if last_v < -0.01:
+            v_sign = -1.0
             
-        dt = (current_time - self.last_time).nanoseconds / 1e9
-        self.last_time = current_time
-        
-        if dt > 1.0:
-            self.get_logger().warning(f"Odom integration gap too large: {dt:.2f}s. Resetting timer.")
-            return
-        
-        # Convert signed RPM to m/s
+        # Convert RPM to m/s (rpm_left and rpm_right are always positive from Mega)
         v_left  = (rpm_left  / 60.0) * 2.0 * math.pi * self.R
         v_right = (rpm_right / 60.0) * 2.0 * math.pi * self.R
         
-        # Differential drive forward kinematics
-        v = (v_right + v_left) / 2.0
-        w = (v_right - v_left) / self.L
-        
-        # Integrate to find position
-        delta_x  = (v * math.cos(self.th)) * dt
-        delta_y  = (v * math.sin(self.th)) * dt
-        delta_th = w * dt
-        
-        self.x  += delta_x
-        self.y  += delta_y
-        self.th += delta_th
-        
-        # Quaternion from yaw
-        q = self.euler_to_quaternion(0, 0, self.th)
+        if v_sign < 0:
+            v = - (v_right + v_left) / 2.0
+            w = 0.0
+        elif last_w > 0.01:  # turning left
+            v = v_right / 2.0
+            w = v_right / self.L
+        elif last_w < -0.01: # turning right
+            v = v_left / 2.0
+            w = - v_left / self.L
+        else:
+            v = (v_right + v_left) / 2.0
+            w = 0.0
+            
+        q = self.euler_to_quaternion(0, 0, odom_theta)
         
         # 1. Publish TF (odom -> base_link)
         t = TransformStamped()
         t.header.stamp = current_time.to_msg()
         t.header.frame_id = 'odom'
         t.child_frame_id = 'base_link'
-        t.transform.translation.x = self.x
-        t.transform.translation.y = self.y
+        t.transform.translation.x = odom_x
+        t.transform.translation.y = odom_y
         t.transform.translation.z = 0.0
         t.transform.rotation.x = q[0]
         t.transform.rotation.y = q[1]
@@ -251,8 +245,8 @@ class ArduinoBridge(Node):
         odom.header.frame_id = 'odom'
         odom.child_frame_id = 'base_link'
         
-        odom.pose.pose.position.x = self.x
-        odom.pose.pose.position.y = self.y
+        odom.pose.pose.position.x = odom_x
+        odom.pose.pose.position.y = odom_y
         odom.pose.pose.position.z = 0.0
         odom.pose.pose.orientation.x = q[0]
         odom.pose.pose.orientation.y = q[1]
