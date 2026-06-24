@@ -29,7 +29,7 @@ class ArduinoBridge(Node):
         default_port = '/dev/arduino' if os.path.exists('/dev/arduino') else '/dev/ttyAS4'
         self.declare_parameter('port', default_port)
         self.declare_parameter('baudrate', 115200)
-        self.declare_parameter('wheel_radius', 0.033) # meters (radius roda)
+        self.declare_parameter('wheel_radius', 0.0325) # meters (radius roda) - matching Arduino WHEEL_DIAMETER = 6.5 cm
         self.declare_parameter('wheel_base', 0.07)    # meters (jarak antar roda) — HARUS sama dengan Arduino
         self.declare_parameter('reconnect_delay', 5.0)
         self.declare_parameter('max_rpm', 80.0)       # batas RPM maksimum

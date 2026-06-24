@@ -286,7 +286,7 @@ class RobotFirebaseBridge(Node):
             
             # Calculate motor wheel RPM from linear & angular velocities
             # using differential drive kinematics matching hardware settings
-            R = 0.033 # wheel radius (meters)
+            R = 0.0325 # wheel radius (meters) - matching Arduino WHEEL_DIAMETER = 6.5 cm
             L = 0.07  # wheel base (meters)
             v = msg.twist.twist.linear.x
             w = msg.twist.twist.angular.z
@@ -313,8 +313,8 @@ class RobotFirebaseBridge(Node):
                         'yaw': round(yaw, 2),
                         'linear_velocity': round(v, 2),
                         'angular_velocity': round(w, 2),
-                        'rpmKiri': round(rpm_left, 1),
-                        'rpmKanan': round(rpm_right, 1),
+                        'rpmKiri': round(abs(rpm_left), 1),
+                        'rpmKanan': round(abs(rpm_right), 1),
                         'gerak': actual_gerak
                     })
                 except Exception as e:
