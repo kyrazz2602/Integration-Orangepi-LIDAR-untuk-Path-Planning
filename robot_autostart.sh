@@ -77,19 +77,46 @@ pkill -9 -f "rplidar_composition"   2>/dev/null || true
 pkill -9 -f "async_slam_toolbox"    2>/dev/null || true
 pkill -9 -f "nav2"                  2>/dev/null || true
 pkill -9 -f "rosbridge_websocket"   2>/dev/null || true
-pkill -9 -f "rplidar-firebase"      2>/dev/null || true
+pkill -9 -f "rplidar-firebase-bridge" 2>/dev/null || true
 
 # Tunggu port benar-benar bebas
 sleep 3
 
-# Verifikasi
-if lsof /dev/ttyAS4 2>/dev/null | grep -q python3; then
-    echo "[WARN] ttyAS4 masih dipegang! Force kill..."
-    fuser -k /dev/ttyAS4 2>/dev/null || true
-    sleep 2
-fi
+# Verifikasi port serial agar tidak ada proses tersangkut
+for port in "/dev/ttyAS4" "/dev/arduino"; do
+    if [ -e "$port" ] && lsof "$port" 2>/dev/null | grep -q python3; then
+        echo "[WARN] $port masih dipegang! Force kill..."
+        fuser -k "$port" 2>/dev/null || true
+        sleep 2
+    fi
+done
 
 echo "[OK] Semua proses lama sudah dibersihkan"
+
+# Inisialisasi variabel PID kosong agar trap cleanup aman
+ROS_PID=""
+ROSBRIDGE_PID=""
+FIREBASE_PID=""
+
+# Fungsi cleanup untuk mematikan semua proses anak saat skrip dihentikan/dimatikan
+cleanup() {
+    echo "=========================================="
+    echo "Menghentikan semua proses robot..."
+    echo "=========================================="
+    
+    # Hentikan secara halus (SIGTERM)
+    [ -n "$ROS_PID" ] && kill -TERM "$ROS_PID" 2>/dev/null
+    [ -n "$ROSBRIDGE_PID" ] && kill -TERM "$ROSBRIDGE_PID" 2>/dev/null
+    [ -n "$FIREBASE_PID" ] && kill -TERM "$FIREBASE_PID" 2>/dev/null
+    sleep 2
+    
+    # Force kill jika masih berjalan (SIGKILL)
+    [ -n "$ROS_PID" ] && kill -9 "$ROS_PID" 2>/dev/null
+    [ -n "$ROSBRIDGE_PID" ] && kill -9 "$ROSBRIDGE_PID" 2>/dev/null
+    [ -n "$FIREBASE_PID" ] && kill -9 "$FIREBASE_PID" 2>/dev/null
+}
+# Registrasi signal handler
+trap cleanup EXIT SIGINT SIGTERM
 
 echo "Memulai ROS 2 SLAM & Navigation..."
 # Menjalankan launch file di background
