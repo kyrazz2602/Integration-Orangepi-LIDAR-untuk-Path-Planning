@@ -48,6 +48,8 @@ class ArduinoBridge(Node):
         self.last_time = self.get_clock().now()
         self.first_odom = True
         self.last_cmd_vel = Twist()  # Simpan cmd_vel terakhir untuk re-send
+        self.last_sent_command = None
+        self.last_sent_rpm = None
         
         # Setup Serial Connection & Lock
         self.serial_lock = threading.Lock()
@@ -79,7 +81,7 @@ class ArduinoBridge(Node):
         self._send_vel_command(self.last_cmd_vel)
 
     def _send_vel_command(self, msg: Twist):
-        """Convert Twist to discrete movement commands for Arduino Mega"""
+        """Convert Twist to discrete movement commands and RPM targets for Arduino Mega"""
         v = msg.linear.x   # m/s
         w = msg.angular.z  # rad/s
         
@@ -89,27 +91,64 @@ class ArduinoBridge(Node):
         
         if v > linear_threshold:
             command = "CMD,MAJU\n"
+            target_rpm = (abs(v) / (2.0 * math.pi * self.R)) * 60.0
         elif v < -linear_threshold:
             command = "CMD,MUNDUR\n"
+            target_rpm = (abs(v) / (2.0 * math.pi * self.R)) * 60.0
         elif w > angular_threshold:
             command = "CMD,KIRI\n"
+            target_rpm = (abs(w) * self.L / (2.0 * math.pi * self.R)) * 60.0
         elif w < -angular_threshold:
             command = "CMD,KANAN\n"
+            target_rpm = (abs(w) * self.L / (2.0 * math.pi * self.R)) * 60.0
         else:
             command = "CMD,DIAM\n"
+            target_rpm = 0.0
             
-        with self.serial_lock:
-            if self.connected and self.ser is not None:
-                try:
-                    self.ser.write(command.encode('utf-8'))
-                except Exception as e:
-                    self.get_logger().error(f"Failed to write to serial: {e}")
-                    self.connected = False
-                    try:
-                        self.ser.close()
-                    except Exception:
-                        pass
-                    self.ser = None
+        rounded_rpm = round(target_rpm, 1)
+        if command != "CMD,DIAM\n":
+            # Constrain to valid ranges for Arduino
+            rounded_rpm = max(10.0, min(rounded_rpm, self.max_rpm))
+            
+        if command == "CMD,DIAM\n":
+            if self.last_sent_command != "CMD,DIAM\n":
+                with self.serial_lock:
+                    if self.connected and self.ser is not None:
+                        try:
+                            self.ser.write(command.encode('utf-8'))
+                            self.last_sent_command = command
+                            self.last_sent_rpm = 0.0
+                        except Exception as e:
+                            self.get_logger().error(f"Failed to write to serial: {e}")
+                            self.connected = False
+                            try:
+                                self.ser.close()
+                            except Exception:
+                                pass
+                            self.ser = None
+        else:
+            rpm_changed = (self.last_sent_rpm is None or abs(rounded_rpm - self.last_sent_rpm) >= 0.5)
+            cmd_changed = (command != self.last_sent_command)
+            
+            if rpm_changed or cmd_changed:
+                with self.serial_lock:
+                    if self.connected and self.ser is not None:
+                        try:
+                            if rpm_changed:
+                                rpm_cmd = f"SET,RPM,{rounded_rpm:.1f}\n"
+                                self.ser.write(rpm_cmd.encode('utf-8'))
+                                self.last_sent_rpm = rounded_rpm
+                            
+                            self.ser.write(command.encode('utf-8'))
+                            self.last_sent_command = command
+                        except Exception as e:
+                            self.get_logger().error(f"Failed to write to serial: {e}")
+                            self.connected = False
+                            try:
+                                self.ser.close()
+                            except Exception:
+                                pass
+                            self.ser = None
 
     def connect_serial(self):
         """Try to establish connection with Arduino serial port"""
@@ -131,7 +170,7 @@ class ArduinoBridge(Node):
                 return False
 
     def serial_read_loop(self):
-        """Read continuous ODOM data from Arduino with auto-reconnection"""
+        """Read continuous data from Arduino with auto-reconnection"""
         import time
         error_count = 0
         MAX_ERRORS = 10
@@ -146,13 +185,17 @@ class ArduinoBridge(Node):
                 continue
                 
             try:
-                # Thread-safe read operation
+                # Copy reference to read outside the lock to prevent blocking writes during timeout
+                ser = None
                 with self.serial_lock:
-                    if self.ser is None:
-                        self.connected = False
-                        continue
-                    line_bytes = self.ser.readline()
+                    if self.ser is not None and self.connected:
+                        ser = self.ser
                 
+                if ser is None:
+                    time.sleep(0.1)
+                    continue
+                
+                line_bytes = ser.readline()
                 if not line_bytes:
                     time.sleep(0.01)
                     continue
@@ -179,6 +222,13 @@ class ArduinoBridge(Node):
                         password = parts[2]
                         self.get_logger().info(f"Received WiFi connection request from ESP32: SSID={ssid}")
                         self.change_wifi(ssid, password)
+                elif line.startswith("ACK:"):
+                    self.get_logger().info(f"Arduino ACK: {line}")
+                elif line.startswith("EVT:"):
+                    self.get_logger().warn(f"Arduino Event: {line}")
+                    # If an obstacle blockage event occurs, reset state so command retry isn't filtered out
+                    if "BLOCKED" in line or "STOP" in line or "OTONOM" in line:
+                        self.last_sent_command = None
             except Exception as e:
                 error_count += 1
                 self.get_logger().warn(f"Error reading from serial (attempt {error_count}/{MAX_ERRORS}): {e}")
