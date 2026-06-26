@@ -257,6 +257,12 @@ class ArduinoBridge(Node):
             v_sign = -1.0
             
         # Convert RPM to m/s (rpm_left and rpm_right are always positive from Mega)
+        # Apply noise filter threshold to RPM (ignore values < 1.5 RPM to handle jitter)
+        if abs(rpm_left) < 1.5:
+            rpm_left = 0.0
+        if abs(rpm_right) < 1.5:
+            rpm_right = 0.0
+
         v_left  = (rpm_left  / 60.0) * 2.0 * math.pi * self.R
         v_right = (rpm_right / 60.0) * 2.0 * math.pi * self.R
         

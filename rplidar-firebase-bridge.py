@@ -305,6 +305,17 @@ class RobotFirebaseBridge(Node):
             else:
                 actual_gerak = 'KIRI' if w > 0 else 'KANAN'
 
+            # Apply noise filter threshold to RPM (ignore values < 1.5 RPM to handle jitter)
+            # If actual_gerak is DIAM, force both RPMs to 0.0
+            if actual_gerak == 'DIAM' or (abs(rpm_left) < 1.5 and abs(rpm_right) < 1.5):
+                rpm_left = 0.0
+                rpm_right = 0.0
+            else:
+                if abs(rpm_left) < 1.5:
+                    rpm_left = 0.0
+                if abs(rpm_right) < 1.5:
+                    rpm_right = 0.0
+
             if self.firebase_ready:
                 try:
                     self.db_ref.child('Status').update({
