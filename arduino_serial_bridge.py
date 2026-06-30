@@ -22,6 +22,7 @@ import serial
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
+from std_msgs.msg import String
 
 
 class ArduinoBridge(Node):
@@ -74,6 +75,9 @@ class ArduinoBridge(Node):
         self.cmd_vel_sub = self.create_subscription(
             Twist, "cmd_vel", self.cmd_vel_callback, 10
         )
+        self.fan_cmd_sub = self.create_subscription(
+            String, "fan_cmd", self.fan_cmd_callback, 10
+        )
 
         # Timer: re-send CMD,VEL at 10Hz untuk menjaga watchdog Arduino
         self.vel_timer = self.create_timer(0.1, self.vel_timer_callback)
@@ -86,6 +90,25 @@ class ArduinoBridge(Node):
         """Convert cmd_vel to per-wheel RPM and send to Arduino immediately"""
         self.last_cmd_vel = msg
         self._send_vel_command(msg)
+
+    def fan_cmd_callback(self, msg: String):
+        """Receive fan speed / auto command and send to Arduino Mega"""
+        cmd_str = msg.data.strip()
+        if not cmd_str.endswith("\n"):
+            cmd_str += "\n"
+        with self.serial_lock:
+            if self.connected and self.ser is not None:
+                try:
+                    self.ser.write(cmd_str.encode("utf-8"))
+                    self.get_logger().info(f"Forwarded fan command to Arduino: {cmd_str.strip()}")
+                except Exception as e:
+                    self.get_logger().error(f"Failed to write fan command to serial: {e}")
+                    self.connected = False
+                    try:
+                        self.ser.close()
+                    except Exception:
+                        pass
+                    self.ser = None
 
     def vel_timer_callback(self):
         """Re-send last velocity command at 10Hz to keep Arduino watchdog alive"""

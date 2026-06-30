@@ -465,22 +465,7 @@ void bacaOrangePi() {
 // BACA ESP32 + FORWARD WIFI KE ORANGE PI
 // ============================================
 void bacaESP32() {
-  if (!Serial3.available())
-    return;
-  String input = Serial3.readStringUntil('\n');
-  input.trim();
-  if (input.length() == 0)
-    return;
-  sumberPerintah = 2;
-  Serial.println("[ESP] " + input);
-
-  if (input.startsWith("WIFI,")) {
-    Serial2.println(input);
-    Serial.println("[WIFI FWD] " + input);
-    return;
-  }
-
-  eksekusiPerintah(input);
+  // ESP32 communication is handled directly by Orange Pi now.
 }
 
 // ============================================
@@ -671,7 +656,6 @@ void kirimOdometri() {
 void setup() {
   Serial.begin(115200);
   Serial2.begin(115200);
-  Serial3.begin(115200);
 
   pinMode(ENC_KANAN_A, INPUT_PULLUP);
   pinMode(ENC_KANAN_B, INPUT_PULLUP);
@@ -730,7 +714,6 @@ void loop() {
 
   bacaSerialMonitor();
   bacaOrangePi();
-  bacaESP32();
   updateAutoKipas();
 
   if (now - lastSensor >= intervalSensor) {
