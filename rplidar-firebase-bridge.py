@@ -309,6 +309,7 @@ class RobotFirebaseBridge(Node):
                 "Persentase": self.latest_battery_percent
             }
             self.db_ref.child("Udara").update(data)
+            self.get_logger().info(f"✓ Uploaded sensor data to Firebase: {data}")
         except Exception as e:
             self.get_logger().error(f"Failed to upload ESP32 sensor data to Firebase: {e}")
 
@@ -427,7 +428,20 @@ class RobotFirebaseBridge(Node):
             speed = str(data).upper()
             self._process_speed_command(speed)
 
-        # 3. Handle initial bulk load or specific updates containing goals
+        # 3. Handle WiFi configuration trigger directly
+        elif path == "/wifi/trigger":
+            if data is True or str(data).lower() in ["true", "1"]:
+                if self.command_ref is not None:
+                    wifi_data = self.command_ref.child("wifi").get()
+                    if isinstance(wifi_data, dict):
+                        self._handle_wifi_change(wifi_data)
+
+        # 4. Handle WiFi configuration update as a dictionary
+        elif path == "/wifi":
+            if isinstance(data, dict):
+                self._handle_wifi_change(data)
+
+        # 5. Handle initial bulk load or specific updates containing goals
         elif path == "/" and isinstance(data, dict):
             if (
                 "goal_x" in data
@@ -458,7 +472,10 @@ class RobotFirebaseBridge(Node):
                 if self.command_ref is not None:
                     self.command_ref.child("save_map").set(False)
 
-        # 4. Handle individual goal_x or goal_y updates if they are set separately (fallback)
+            if "wifi" in data and isinstance(data["wifi"], dict):
+                self._handle_wifi_change(data["wifi"])
+
+        # 6. Handle individual goal_x or goal_y updates if they are set separately (fallback)
         elif path in ["/goal_x", "/goal_y"]:
             if self.command_ref is not None:
                 command_data = self.command_ref.get()
@@ -474,6 +491,78 @@ class RobotFirebaseBridge(Node):
                         # Clear goal from DB after reading so it doesn't loop
                         self.command_ref.child("goal_x").delete()
                         self.command_ref.child("goal_y").delete()
+
+    def _handle_wifi_change(self, wifi_data: dict):
+        """Trigger connection to a new WiFi network in a separate thread"""
+        trigger = wifi_data.get("trigger", False)
+        ssid = wifi_data.get("ssid")
+        password = wifi_data.get("password")
+
+        if (trigger is True or str(trigger).lower() in ["true", "1"]) and ssid:
+            # Launch background worker so it doesn't block the listener thread
+            threading.Thread(
+                target=self.wifi_connect_worker,
+                args=(ssid, password or ""),
+                daemon=True
+            ).start()
+
+    def wifi_connect_worker(self, ssid: str, password: str):
+        self.get_logger().info(f"Attempting to connect to WiFi SSID: '{ssid}'...")
+        if self.firebase_ready and self.db_ref is not None:
+            try:
+                self.db_ref.child("Status").update({
+                    "wifi_status": "Connecting...",
+                    "wifi_error": ""
+                })
+            except Exception as e:
+                self.get_logger().error(f"Failed to set WiFi connecting status: {e}")
+
+        try:
+            import subprocess
+            # nmcli device wifi connect "SSID" password "PASSWORD"
+            cmd = ["nmcli", "device", "wifi", "connect", ssid]
+            if password:
+                cmd.extend(["password", password])
+
+            self.get_logger().info(f"Running WiFi command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=25.0)
+
+            if result.returncode == 0:
+                self.get_logger().info(f"✓ Successfully connected to WiFi: {ssid}")
+                if self.firebase_ready and self.db_ref is not None:
+                    self.db_ref.child("Status").update({
+                        "wifi_status": f"Connected to {ssid}",
+                        "wifi_error": ""
+                    })
+            else:
+                error_msg = result.stderr.strip() or result.stdout.strip()
+                self.get_logger().error(f"✗ Failed to connect to WiFi: {error_msg}")
+                if self.firebase_ready and self.db_ref is not None:
+                    self.db_ref.child("Status").update({
+                        "wifi_status": "Failed to connect",
+                        "wifi_error": error_msg[:100]
+                    })
+        except subprocess.TimeoutExpired:
+            self.get_logger().error("✗ WiFi connection attempt timed out.")
+            if self.firebase_ready and self.db_ref is not None:
+                self.db_ref.child("Status").update({
+                    "wifi_status": "Timeout",
+                    "wifi_error": "Connection timed out (25s)"
+                })
+        except Exception as e:
+            self.get_logger().error(f"✗ WiFi connection error: {e}")
+            if self.firebase_ready and self.db_ref is not None:
+                self.db_ref.child("Status").update({
+                    "wifi_status": "Error",
+                    "wifi_error": str(e)[:100]
+                })
+        finally:
+            # Reset trigger in Command/wifi/trigger to False
+            if self.command_ref is not None:
+                try:
+                    self.command_ref.child("wifi").update({"trigger": False})
+                except Exception as e:
+                    self.get_logger().error(f"Failed to reset WiFi trigger in Firebase: {e}")
 
     def send_nav_goal(self, x, y):
         """Send goal to Nav2 Action Server"""
