@@ -64,26 +64,29 @@ float co_final = 0;
 float voc_final = 0;
 float suhu_final = 0;
 
-// ===== SERIAL2 KE ORANGE PI =====
-#define RXD2 26
-#define TXD2 27
-
 // ===== TIMER LCD =====
 unsigned long lastLcdSwitch = 0;
 int lcdPage = 0;
 #define LCD_SWITCH_INTERVAL 3000
 
-// ===== TIMER BACA & TRANSMI SENSOR =====
+// ===== TIMER KIRIM KE ORANGE PI =====
+unsigned long lastSensorUpload = 0;
+#define SENSOR_UPLOAD_INTERVAL 1000
+
+// ===== TIMER BACA SENSOR =====
 unsigned long lastSensorRead = 0;
 #define SENSOR_READ_INTERVAL 1000
 
-// ===== OVERRIDE LCD DARI MASTER =====
-bool isLcdOverridden = false;
-unsigned long lastLcdOverride = 0;
-#define LCD_OVERRIDE_TIMEOUT 5000
+// ===== STATUS NAVIGASI DARI ORANGE PI =====
+String statusNavigasi = "IDLE";
+String modeRobot = "-";
+bool sedangNavigasi = false;
+unsigned long lastNavUpdate = 0;
+#define NAV_TIMEOUT 5000
 
-String inputBuffer = "";
-String inputBuffer2 = "";
+// ================= SERIAL2 KE ORANGE PI =================
+#define RXD2 26
+#define TXD2 27
 
 // ================= REINIT LCD =================
 void reinitLCD() {
@@ -100,7 +103,7 @@ void reinitLCD() {
 float bacaTegangan() {
   int adc = analogRead(BATTERY_PIN);
   float vADC = (adc * 3.3) / 4095.0;
-  vADC *= 1.10; // kompensasi resistor tambahan 10k-100k
+  vADC *= 1.10;
   float vDivider = vADC / (R2_bat / (R1_bat + R2_bat));
   return (bat_a * vDivider) + bat_b;
 }
@@ -139,11 +142,67 @@ float bacaVOC() {
   return mq135_a * pow(rs_mq135 / mq135_r0, mq135_b);
 }
 
-// ================= FUNGSI TAMPIL LCD DEFAULT =================
-void tampilLCD() {
-  if (isLcdOverridden)
+// ================= KIRIM DATA SENSOR KE ORANGE PI =================
+void kirimSensorKeOrangePi() {
+  if (millis() - lastSensorUpload < SENSOR_UPLOAD_INTERVAL)
     return;
+  lastSensorUpload = millis();
+
+  String data = "DATA," + String(pm25, 1) + "," + String(pm10, 1) + "," +
+                String(co_final, 2) + "," + String(voc_final, 3) + "," +
+                String(suhu_final, 1) + "," + String(batteryVoltage, 2) + "," +
+                String(batteryPercent);
+  Serial2.println(data);
+  Serial.println("[KIRIM] " + data);
+}
+
+// ================= TERIMA STATUS NAVIGASI DARI ORANGE PI =================
+void terimaDariOrangePi() {
+  while (Serial2.available()) {
+    String line = Serial2.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0)
+      continue;
+
+    Serial.println("[TERIMA] " + line);
+
+    if (line.startsWith("NAV,")) {
+      int firstComma = line.indexOf(',');
+      int secondComma = line.indexOf(',', firstComma + 1);
+
+      if (secondComma > 0) {
+        statusNavigasi = line.substring(firstComma + 1, secondComma);
+        modeRobot = line.substring(secondComma + 1);
+      } else {
+        statusNavigasi = line.substring(firstComma + 1);
+      }
+      lastNavUpdate = millis();
+
+      statusNavigasi.toUpperCase();
+      sedangNavigasi = (statusNavigasi != "IDLE" && statusNavigasi != "STOP");
+    }
+  }
+
+  if (millis() - lastNavUpdate > NAV_TIMEOUT) {
+    statusNavigasi = "OFFLINE";
+    sedangNavigasi = false;
+  }
+}
+
+// ================= FUNGSI TAMPIL LCD =================
+void tampilLCD() {
   lcd.clear();
+
+  if (sedangNavigasi) {
+    lcd.setCursor(0, 0);
+    lcd.print("Robot Bergerak");
+    lcd.setCursor(0, 1);
+    lcd.print(statusNavigasi);
+    lcd.print(" ");
+    lcd.print(modeRobot);
+    return;
+  }
+
   switch (lcdPage) {
   case 0:
     lcd.setCursor(0, 0);
@@ -196,94 +255,47 @@ void tampilLCD() {
     lcd.print(batteryVoltage, 2);
     lcd.print("V");
     break;
-  case 4:
-    lcd.setCursor(0, 0);
-    lcd.print("WiFi: Offline");
-    lcd.setCursor(0, 1);
-    lcd.print("Firebase: Off");
-    break;
-  }
-}
-
-// ================= PROSES SERIAL COMMANDS =================
-void parseLcdCommand(String line) {
-  line.trim();
-  if (line.startsWith("$LCD,0,")) {
-    String text = line.substring(7);
-    lcd.setCursor(0, 0);
-    lcd.print("                "); // clear line
-    lcd.setCursor(0, 0);
-    lcd.print(text.substring(0, 16));
-    lastLcdOverride = millis();
-    isLcdOverridden = true;
-  } else if (line.startsWith("$LCD,1,")) {
-    String text = line.substring(7);
-    lcd.setCursor(0, 1);
-    lcd.print("                "); // clear line
-    lcd.setCursor(0, 1);
-    lcd.print(text.substring(0, 16));
-    lastLcdOverride = millis();
-    isLcdOverridden = true;
-  }
-}
-
-void bacaSerialInputs() {
-  // Baca dari USB Serial
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '\n') {
-      parseLcdCommand(inputBuffer);
-      inputBuffer = "";
-    } else {
-      inputBuffer += c;
-    }
-  }
-
-  // Baca dari hardware Serial2 (Orange Pi UART7)
-  while (Serial2.available() > 0) {
-    char c = Serial2.read();
-    if (c == '\n') {
-      parseLcdCommand(inputBuffer2);
-      inputBuffer2 = "";
-    } else {
-      inputBuffer2 += c;
-    }
   }
 }
 
 // ================= SETUP =================
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+  Serial.println();
+  Serial.println("=== AIRGUARD BOOT START ===");
+
   Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
+  Serial.println("[OK] Serial2 ke Orange Pi siap");
 
-  Wire.begin(21, 22);
-  Wire.setClock(100000);
-  delay(100);
-  lcd.init();
-  delay(50);
+  Serial.println("[STEP] Mulai init LCD...");
+  reinitLCD();
+  Serial.println("[OK] LCD siap");
+
   lcd.clear();
-  delay(50);
-  lcd.backlight();
-  delay(100);
-
   lcd.setCursor(0, 0);
   lcd.print("AirGuard v1.0");
   lcd.setCursor(0, 1);
-  lcd.print("Slave Sensor AP");
-  delay(1500);
+  lcd.print("Inisialisasi...");
+  delay(1000);
 
+  Serial.println("[STEP] Init sensor MQ & DHT...");
   pinMode(MQ7_PIN, INPUT);
   pinMode(MQ135_PIN, INPUT);
   dht.begin();
+  Serial.println("[OK] MQ & DHT siap");
+
+  Serial.println("[STEP] Init SDS011...");
   sds.begin(16, 17);
+  Serial.println("[OK] SDS011 siap");
 
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("Sensor siap");
   lcd.setCursor(0, 1);
   lcd.print("Cek baterai...");
-  delay(500);
 
+  Serial.println("[STEP] Baca baterai awal...");
   for (int i = 0; i < 50; i++) {
     avgBattery.push(bacaTegangan());
     delay(10);
@@ -291,48 +303,48 @@ void setup() {
   batteryVoltage = avgBattery.average();
   batteryPercent = voltageToPercent(batteryVoltage);
   batteryPercentLast = batteryPercent;
+  Serial.println("[OK] Baterai: " + String(batteryVoltage) + "V (" +
+                 String(batteryPercent) + "%)");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Bat:");
+  lcd.print(batteryPercent);
+  lcd.print("% ");
+  lcd.print(batteryVoltage, 2);
+  lcd.print("V");
+  delay(1000);
+
+  lastNavUpdate = millis();
 
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("Sistem siap!");
-  delay(1000);
+  Serial.println("=== AIRGUARD BOOT SELESAI, MASUK LOOP ===");
+  delay(500);
 }
 
 // ================= LOOP =================
 void loop() {
-  // Cek input dari master (Orange Pi)
-  bacaSerialInputs();
+  terimaDariOrangePi();
 
-  // Cek override timeout
-  if (isLcdOverridden && (millis() - lastLcdOverride > LCD_OVERRIDE_TIMEOUT)) {
-    isLcdOverridden = false;
-    lcdPage = 0;
-    tampilLCD();
-  }
-
-  // Baca dan kirim sensor secara periodik
   if (millis() - lastSensorRead >= SENSOR_READ_INTERVAL) {
     lastSensorRead = millis();
 
-    // Read SDS011
     if (sds.read(&pm25_raw, &pm10_raw) == 0) {
       pm25 = koreksiPM25(pm25_raw);
       pm10 = koreksiPM10(pm10_raw);
     }
 
-    // Read DHT22
     float suhu_raw = dht.readTemperature();
     if (!isnan(suhu_raw))
       suhu_final = koreksiSuhu(suhu_raw);
 
-    // Read MQ7 & MQ135
     avgCO.push(bacaCO());
     co_final = avgCO.average();
 
     avgVOC.push(bacaVOC());
     voc_final = avgVOC.average();
 
-    // Read Battery
     if (millis() - lastBatRead >= BAT_READ_INTERVAL) {
       avgBattery.push(bacaTegangan());
       batteryVoltage = avgBattery.average();
@@ -344,21 +356,17 @@ void loop() {
       lastBatRead = millis();
     }
 
-    // Send sensor data to Orange Pi
-    // Format: $DATA,pm25,pm10,co,voc,suhu,voltage,percent
-    String dataMsg = "$DATA," + String(pm25, 1) + "," + String(pm10, 1) + "," +
-                     String(co_final, 1) + "," + String(voc_final, 4) + "," +
-                     String(suhu_final, 1) + "," + String(batteryVoltage, 2) + "," +
-                     String(batteryPercent);
-    
-    Serial.println(dataMsg);
-    Serial2.println(dataMsg);
+    Serial.printf(
+        "PM2.5:%.2f PM10:%.2f CO:%.2f VOC:%.2f Suhu:%.2f Bat:%.2fV(%d%%)\n",
+        pm25, pm10, co_final, voc_final, suhu_final, batteryVoltage,
+        batteryPercent);
   }
 
-  // Auto switch LCD page if not overridden
-  if (!isLcdOverridden && (millis() - lastLcdSwitch >= LCD_SWITCH_INTERVAL)) {
-    lcdPage = (lcdPage + 1) % 5;
+  if (millis() - lastLcdSwitch >= LCD_SWITCH_INTERVAL) {
+    lcdPage = (lcdPage + 1) % 4;
     tampilLCD();
     lastLcdSwitch = millis();
   }
+
+  kirimSensorKeOrangePi();
 }

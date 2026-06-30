@@ -257,7 +257,7 @@ class RobotFirebaseBridge(Node):
 
                 # Parse sensor values from ESP32
                 # Format: $DATA,pm25,pm10,co,voc,suhu,voltage,percent
-                if line.startswith("$DATA,"):
+                if line.startswith("DATA,"):
                     parts = line.split(",")
                     if len(parts) == 8:
                         try:
@@ -335,68 +335,33 @@ class RobotFirebaseBridge(Node):
                 self.get_logger().error(f"Failed to update Status/kipas in Firebase: {e}")
 
     def _update_lcd_timer_callback(self):
-        """Timer to cycle pages and write formatting to ESP32 LCD"""
-        wifi_status = check_wifi_status()
-        fb_status = "OK" if self.firebase_ready else "Off"
+        """Timer to send navigation status to ESP32 LCD"""
+        status = "IDLE"
+        mode = "MANUAL"
+        
+        # Check if manual movement is active
+        if self.last_gerak is not None and self.last_gerak != "DIAM":
+            status = self.last_gerak
+            mode = "MANUAL"
+        # Check if autonomous navigation is active
+        elif self.nav_status in ["SENDING_GOAL", "NAVIGATING"]:
+            status = self.nav_status
+            mode = "OTONOM"
+        # Check if a recent navigation result was achieved (show it for feedback)
+        elif self.nav_status in ["SUCCEEDED", "ABORTED", "CANCELED"]:
+            status = self.nav_status
+            mode = "OTONOM"
+            # Reset back to IDLE after showing it once
+            self.nav_status = "IDLE"
 
-        # Increment page (0 to 5)
-        self.lcd_page = (self.lcd_page + 1) % 6
-
-        line0 = ""
-        line1 = ""
-
-        if self.lcd_page == 0:
-            line0 = f"PM2.5: {self.latest_pm25:.1f}"
-            if self.latest_pm25 <= 35.4:
-                line1 = "Status: Baik"
-            elif self.latest_pm25 <= 125.4:
-                line1 = "Status:Perhatian"
-            else:
-                line1 = "Status: Bahaya"
-
-        elif self.lcd_page == 1:
-            line0 = f"PM10 : {self.latest_pm10:.1f}"
-            if self.latest_pm10 <= 154.0:
-                line1 = "Status: Baik"
-            elif self.latest_pm10 <= 354.0:
-                line1 = "Status:Perhatian"
-            else:
-                line1 = "Status: Bahaya"
-
-        elif self.lcd_page == 2:
-            line0 = f"CO  : {self.latest_co:.1f} ppm"
-            line1 = f"VOC : {self.latest_voc:.3f} mg"
-
-        elif self.lcd_page == 3:
-            line0 = f"Suhu: {self.latest_suhu:.1f} C"
-            line1 = f"Bat : {self.latest_battery_percent}% {self.latest_battery_voltage:.1f}V"
-
-        elif self.lcd_page == 4:
-            line0 = f"WiFi: {wifi_status}"
-            line1 = f"Firebase: {fb_status}"
-
-        elif self.lcd_page == 5:
-            line0 = f"Nav : {self.nav_status}"
-            line1 = f"Kipas: {self.current_speed_cmd}"
-
-        self.write_lcd(line0, line1)
-
-    def write_lcd(self, line0: str, line1: str):
-        """Send lines of text to ESP32 LCD"""
-        line0 = line0[:16]
-        line1 = line1[:16]
-
-        cmd0 = f"$LCD,0,{line0}\n"
-        cmd1 = f"$LCD,1,{line1}\n"
+        nav_msg = f"NAV,{status},{mode}\n"
 
         with self.esp_ser_lock:
             if self.esp_connected and self.esp_ser is not None:
                 try:
-                    self.esp_ser.write(cmd0.encode("utf-8"))
-                    time.sleep(0.05)  # small delay to prevent buffer overflow on ESP32
-                    self.esp_ser.write(cmd1.encode("utf-8"))
+                    self.esp_ser.write(nav_msg.encode("utf-8"))
                 except Exception as e:
-                    self.get_logger().error(f"Failed to write to ESP32 LCD: {e}")
+                    self.get_logger().error(f"Failed to write navigation status to ESP32: {e}")
 
     def cancel_nav_goal(self):
         """Cancel active Nav2 autonomous navigation goal if any"""
