@@ -83,6 +83,7 @@ String modeRobot = "-";
 bool sedangNavigasi = false;
 unsigned long lastNavUpdate = 0;
 #define NAV_TIMEOUT 5000
+bool opiOnline = false;
 
 // ================= SERIAL2 KE ORANGE PI =================
 #define RXD2 26
@@ -152,8 +153,14 @@ void kirimSensorKeOrangePi() {
                 String(co_final, 2) + "," + String(voc_final, 3) + "," +
                 String(suhu_final, 1) + "," + String(batteryVoltage, 2) + "," +
                 String(batteryPercent);
-  Serial2.println(data);
-  Serial.println("[KIRIM] " + data);
+
+  if (opiOnline) {
+    Serial2.println(data);
+    Serial.println("[KIRIM - OPI] " + data);
+  } else {
+    Serial2.println(data); // Also send to Orange Pi
+    Serial.println(data);  // Send directly to Arduino Serial3 via TX0
+  }
 }
 
 // ================= TERIMA STATUS NAVIGASI DARI ORANGE PI =================
@@ -169,12 +176,22 @@ void terimaDariOrangePi() {
     if (line.startsWith("NAV,")) {
       int firstComma = line.indexOf(',');
       int secondComma = line.indexOf(',', firstComma + 1);
+      int thirdComma = line.indexOf(',', secondComma + 1);
 
       if (secondComma > 0) {
         statusNavigasi = line.substring(firstComma + 1, secondComma);
-        modeRobot = line.substring(secondComma + 1);
+        if (thirdComma > 0) {
+          modeRobot = line.substring(secondComma + 1, thirdComma);
+          String onlineStr = line.substring(thirdComma + 1);
+          onlineStr.trim();
+          opiOnline = (onlineStr == "1" || onlineStr.equalsIgnoreCase("online"));
+        } else {
+          modeRobot = line.substring(secondComma + 1);
+          opiOnline = false;
+        }
       } else {
         statusNavigasi = line.substring(firstComma + 1);
+        opiOnline = false;
       }
       lastNavUpdate = millis();
 
@@ -186,6 +203,7 @@ void terimaDariOrangePi() {
   if (millis() - lastNavUpdate > NAV_TIMEOUT) {
     statusNavigasi = "OFFLINE";
     sedangNavigasi = false;
+    opiOnline = false;
   }
 }
 

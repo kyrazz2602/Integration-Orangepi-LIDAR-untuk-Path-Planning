@@ -465,7 +465,34 @@ void bacaOrangePi() {
 // BACA ESP32 + FORWARD WIFI KE ORANGE PI
 // ============================================
 void bacaESP32() {
-  // ESP32 communication is handled directly by Orange Pi now.
+  if (!Serial3.available())
+    return;
+  String input = Serial3.readStringUntil('\n');
+  input.trim();
+  if (input.length() == 0)
+    return;
+  Serial.println("[ESP32] " + input);
+
+  if (input.startsWith("DATA,")) {
+    // Format: DATA,pm25,pm10,co,voc,suhu,voltage,percent
+    int comma1 = input.indexOf(',');
+    int comma2 = input.indexOf(',', comma1 + 1);
+    int comma3 = input.indexOf(',', comma2 + 1);
+    int comma4 = input.indexOf(',', comma3 + 1);
+    int comma5 = input.indexOf(',', comma4 + 1);
+
+    if (comma1 > 0 && comma2 > 0 && comma3 > 0 && comma4 > 0) {
+      last_pm25 = input.substring(comma1 + 1, comma2).toFloat();
+      last_pm10 = input.substring(comma2 + 1, comma3).toFloat();
+      last_co = input.substring(comma3 + 1, comma4).toFloat();
+      if (comma5 > 0) {
+        last_voc = input.substring(comma4 + 1, comma5).toFloat();
+      } else {
+        last_voc = input.substring(comma4 + 1).toFloat();
+      }
+      modeAuto = true; // Automatically enable auto mode when receiving direct offline data
+    }
+  }
 }
 
 // ============================================
@@ -656,6 +683,7 @@ void kirimOdometri() {
 void setup() {
   Serial.begin(115200);
   Serial2.begin(115200);
+  Serial3.begin(115200);
 
   pinMode(ENC_KANAN_A, INPUT_PULLUP);
   pinMode(ENC_KANAN_B, INPUT_PULLUP);
@@ -714,6 +742,7 @@ void loop() {
 
   bacaSerialMonitor();
   bacaOrangePi();
+  bacaESP32();
   updateAutoKipas();
 
   if (now - lastSensor >= intervalSensor) {

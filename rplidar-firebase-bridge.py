@@ -165,6 +165,13 @@ class RobotFirebaseBridge(Node):
         # Trigger initial WiFi scan in background
         threading.Thread(target=self._scan_wifi_worker, daemon=True).start()
 
+        # Background thread to monitor internet/online status
+        self.is_online = False
+        self.wifi_status_thread = threading.Thread(
+            target=self._wifi_status_monitor_loop, daemon=True
+        )
+        self.wifi_status_thread.start()
+
         self.get_logger().info("=" * 60)
         self.get_logger().info("Robot Firebase Bridge Started")
         self.get_logger().info(f"ESP32 Serial Port: {self.esp32_port}")
@@ -360,7 +367,8 @@ class RobotFirebaseBridge(Node):
             # Reset back to IDLE after showing it once
             self.nav_status = "IDLE"
 
-        nav_msg = f"NAV,{status},{mode}\n"
+        online_val = "1" if self.is_online else "0"
+        nav_msg = f"NAV,{status},{mode},{online_val}\n"
 
         with self.esp_ser_lock:
             if self.esp_connected and self.esp_ser is not None:
@@ -535,6 +543,16 @@ class RobotFirebaseBridge(Node):
     def _wifi_scan_timer_callback(self):
         """Timer callback for periodic WiFi scanning"""
         threading.Thread(target=self._scan_wifi_worker, daemon=True).start()
+
+    def _wifi_status_monitor_loop(self):
+        """Periodically check internet connectivity in the background"""
+        while rclpy.ok():
+            try:
+                self.is_online = (check_wifi_status() == "Connected")
+            except Exception as e:
+                self.get_logger().error(f"Error checking wifi status: {e}")
+                self.is_online = False
+            time.sleep(10.0)
 
     def _scan_wifi_worker(self):
         """Scan available WiFi networks and upload them to Firebase"""
