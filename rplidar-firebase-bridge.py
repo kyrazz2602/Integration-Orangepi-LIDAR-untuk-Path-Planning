@@ -160,6 +160,11 @@ class RobotFirebaseBridge(Node):
             self.auto_save_map_interval, self.auto_save_map_callback
         )
 
+        # Timer for periodic WiFi scanning (runs every 45 seconds)
+        self.wifi_scan_timer = self.create_timer(45.0, self._wifi_scan_timer_callback)
+        # Trigger initial WiFi scan in background
+        threading.Thread(target=self._scan_wifi_worker, daemon=True).start()
+
         self.get_logger().info("=" * 60)
         self.get_logger().info("Robot Firebase Bridge Started")
         self.get_logger().info(f"ESP32 Serial Port: {self.esp32_port}")
@@ -436,6 +441,17 @@ class RobotFirebaseBridge(Node):
                     if isinstance(wifi_data, dict):
                         self._handle_wifi_change(wifi_data)
 
+        # 3.1 Handle WiFi scan trigger directly
+        elif path == "/wifi/scan_trigger":
+            if data is True or str(data).lower() in ["true", "1"]:
+                self.get_logger().info("Manual WiFi scan command received from Firebase!")
+                threading.Thread(target=self._scan_wifi_worker, daemon=True).start()
+                if self.command_ref is not None:
+                    try:
+                        self.command_ref.child("wifi").update({"scan_trigger": False})
+                    except Exception as e:
+                        self.get_logger().error(f"Failed to reset scan_trigger in Firebase: {e}")
+
         # 4. Handle WiFi configuration update as a dictionary
         elif path == "/wifi":
             if isinstance(data, dict):
@@ -497,6 +513,16 @@ class RobotFirebaseBridge(Node):
         trigger = wifi_data.get("trigger", False)
         ssid = wifi_data.get("ssid")
         password = wifi_data.get("password")
+        scan_trigger = wifi_data.get("scan_trigger", False)
+
+        if (scan_trigger is True or str(scan_trigger).lower() in ["true", "1"]):
+            self.get_logger().info("WiFi scan trigger received in wifi change handler")
+            threading.Thread(target=self._scan_wifi_worker, daemon=True).start()
+            if self.command_ref is not None:
+                try:
+                    self.command_ref.child("wifi").update({"scan_trigger": False})
+                except Exception as e:
+                    self.get_logger().error(f"Failed to reset scan_trigger in Firebase: {e}")
 
         if (trigger is True or str(trigger).lower() in ["true", "1"]) and ssid:
             # Launch background worker so it doesn't block the listener thread
@@ -505,6 +531,37 @@ class RobotFirebaseBridge(Node):
                 args=(ssid, password or ""),
                 daemon=True
             ).start()
+
+    def _wifi_scan_timer_callback(self):
+        """Timer callback for periodic WiFi scanning"""
+        threading.Thread(target=self._scan_wifi_worker, daemon=True).start()
+
+    def _scan_wifi_worker(self):
+        """Scan available WiFi networks and upload them to Firebase"""
+        try:
+            import subprocess
+            cmd = ["nmcli", "-t", "-f", "SSID", "device", "wifi", "list"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15.0)
+            if result.returncode == 0:
+                ssids = []
+                for line in result.stdout.splitlines():
+                    ssid = line.strip()
+                    # Filter out empty, duplicate, or placeholder SSIDs
+                    if ssid and ssid != "--" and ssid not in ssids:
+                        ssids.append(ssid)
+                
+                # Upload list of SSIDs to Firebase
+                if self.firebase_ready and self.db_ref is not None:
+                    self.db_ref.child("Status").update({
+                        "detected_wifis": ssids
+                    })
+                    self.get_logger().info(f"✓ Scanned and uploaded {len(ssids)} WiFi networks: {ssids}")
+            else:
+                self.get_logger().warning(f"WiFi scan warning: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            self.get_logger().error("WiFi scan timeout expired!")
+        except Exception as e:
+            self.get_logger().error(f"Error scanning WiFi: {e}")
 
     def wifi_connect_worker(self, ssid: str, password: str):
         self.get_logger().info(f"Attempting to connect to WiFi SSID: '{ssid}'...")
