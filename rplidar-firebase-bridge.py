@@ -8,6 +8,7 @@ Handles:
 4. Reading ESP32 sensor data via UART7 and uploading to Firebase /Udara
 5. Sending LCD formatting commands to ESP32 LCD
 6. Processing fan commands from Firebase and publishing to ROS /fan_cmd
+7. Real-time map grid, scan points, A* path upload to Firebase for dashboard
 """
 
 import os
@@ -17,15 +18,16 @@ import time
 import socket
 import threading
 import serial
+import base64
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path as FilePath
 
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from nav2_msgs.action import NavigateToPose
 from action_msgs.msg import GoalStatus
 from std_msgs.msg import String
@@ -87,6 +89,12 @@ class RobotFirebaseBridge(Node):
         self.odom_sub = self.create_subscription(
             Odometry, "/odom", self.odom_callback, 10
         )
+        self.map_sub = self.create_subscription(
+            OccupancyGrid, "/map", self.map_callback, 10
+        )
+        self.plan_sub = self.create_subscription(
+            Path, "/plan", self.plan_callback, 10
+        )
 
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.fan_cmd_pub = self.create_publisher(String, "/fan_cmd", 10)
@@ -130,6 +138,12 @@ class RobotFirebaseBridge(Node):
         self.last_odom_publish_time = self.get_clock().now()
         self.goal_handle = None  # Track active Nav2 goal pose
 
+        # Real-time mapping state variables
+        self.latest_map_data = None       # Latest OccupancyGrid message
+        self.latest_scan_points = []      # Latest LiDAR scan points [{x,y},...]
+        self.latest_plan_path = []         # Latest A* path [{x,y},...]
+        self.map_data_lock = threading.Lock()
+
         # ESP32 and Fan State Variables
         self.latest_pm25 = 0.0
         self.latest_pm10 = 0.0
@@ -159,6 +173,9 @@ class RobotFirebaseBridge(Node):
         self.auto_save_timer = self.create_timer(
             self.auto_save_map_interval, self.auto_save_map_callback
         )
+
+        # Timer for periodic map data upload to Firebase (every 5 seconds)
+        self.map_upload_timer = self.create_timer(5.0, self._upload_map_data_callback)
 
         # Timer for periodic WiFi scanning (runs every 45 seconds)
         self.wifi_scan_timer = self.create_timer(45.0, self._wifi_scan_timer_callback)
@@ -190,14 +207,14 @@ class RobotFirebaseBridge(Node):
             script_dir = os.path.dirname(os.path.abspath(__file__))
 
             paths_to_check = [
-                os.path.join(script_dir, cred_filename),  # Lokasi di install space / script dir
-                os.path.join(os.getcwd(), cred_filename),  # Lokasi di root workspace saat ini
-                os.path.join(os.path.expanduser("~"), cred_filename),  # Lokasi di home directory
+                os.path.join(script_dir, cred_filename),
+                os.path.join(os.getcwd(), cred_filename),
+                os.path.join(os.path.expanduser("~"), cred_filename),
             ]
 
             cred_path = None
-            for path in paths_to_check:
-                if Path(path).exists():
+            for path in paths_to_check:  # noqa: F841
+                if FilePath(path).exists():
                     cred_path = path
                     break
 
@@ -774,6 +791,131 @@ class RobotFirebaseBridge(Node):
                 except Exception as e:
                     self.get_logger().error(f"Firebase odom publish error: {e}")
 
+    def map_callback(self, msg: OccupancyGrid):
+        """Receive occupancy grid from SLAM Toolbox and store for periodic Firebase upload"""
+        with self.map_data_lock:
+            self.latest_map_data = msg
+
+    def plan_callback(self, msg: Path):
+        """Receive A* planned path from Nav2 and store for Firebase upload"""
+        path_points = []
+        # Downsample path to max 100 points to limit payload
+        step = max(1, len(msg.poses) // 100)
+        for i in range(0, len(msg.poses), step):
+            pose = msg.poses[i]
+            path_points.append({
+                "x": round(pose.pose.position.x, 3),
+                "y": round(pose.pose.position.y, 3),
+            })
+        # Always include the final point
+        if msg.poses and (len(msg.poses) - 1) % step != 0:
+            last = msg.poses[-1]
+            path_points.append({
+                "x": round(last.pose.position.x, 3),
+                "y": round(last.pose.position.y, 3),
+            })
+
+        with self.map_data_lock:
+            self.latest_plan_path = path_points
+
+        # Immediately upload path to Firebase for responsive dashboard display
+        if self.firebase_ready and self.db_ref is not None:
+            try:
+                self.db_ref.child("Map").child("path").set({
+                    "points": path_points,
+                    "timestamp": datetime.now().isoformat(),
+                })
+                self.get_logger().info(f"✓ Uploaded A* path ({len(path_points)} pts) to Firebase")
+            except Exception as e:
+                self.get_logger().error(f"Failed to upload path to Firebase: {e}")
+
+    def _upload_map_data_callback(self):
+        """Periodic timer (every 5s): Upload map grid, scan points, and robot pose to Firebase"""
+        if not self.firebase_ready or self.db_ref is None:
+            return
+
+        threading.Thread(target=self._upload_map_data_worker, daemon=True).start()
+
+    def _upload_map_data_worker(self):
+        """Background worker to upload map data to Firebase without blocking ROS callbacks"""
+        try:
+            map_ref = self.db_ref.child("Map")
+            now_iso = datetime.now().isoformat()
+
+            # 1. Upload downsampled occupancy grid
+            with self.map_data_lock:
+                map_msg = self.latest_map_data
+
+            if map_msg is not None:
+                info = map_msg.info
+                width = info.width
+                height = info.height
+                resolution = info.resolution
+                origin_x = info.origin.position.x
+                origin_y = info.origin.position.y
+
+                # Downsample by factor of 4 for bandwidth efficiency
+                ds_factor = 4
+                ds_w = width // ds_factor
+                ds_h = height // ds_factor
+
+                grid_data = map_msg.data
+                ds_cells = []
+                for row in range(ds_h):
+                    for col in range(ds_w):
+                        # Sample center cell of each ds_factor x ds_factor block
+                        src_row = row * ds_factor + ds_factor // 2
+                        src_col = col * ds_factor + ds_factor // 2
+                        if src_row < height and src_col < width:
+                            val = grid_data[src_row * width + src_col]
+                        else:
+                            val = -1
+                        ds_cells.append(val)
+
+                # Encode as base64 int8 array for compact transfer
+                byte_data = bytes([(v + 128) & 0xFF for v in ds_cells])  # shift -1..100 to 0..228
+                grid_b64 = base64.b64encode(byte_data).decode('ascii')
+
+                map_ref.child("grid").set({
+                    "width": ds_w,
+                    "height": ds_h,
+                    "resolution": round(resolution * ds_factor, 4),
+                    "origin_x": round(origin_x, 4),
+                    "origin_y": round(origin_y, 4),
+                    "data_b64": grid_b64,
+                    "timestamp": now_iso,
+                })
+
+            # 2. Upload scan points
+            with self.map_data_lock:
+                scan_pts = list(self.latest_scan_points)
+
+            if scan_pts:
+                map_ref.child("scan_points").set({
+                    "points": scan_pts,
+                    "timestamp": now_iso,
+                })
+
+            # 3. Upload robot pose (from latest odom)
+            if self.current_odom is not None:
+                odom = self.current_odom
+                x = odom.pose.pose.position.x
+                y = odom.pose.pose.position.y
+                q = odom.pose.pose.orientation
+                siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+                cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+                yaw = math.atan2(siny_cosp, cosy_cosp)
+
+                map_ref.child("robot_pose").set({
+                    "x": round(x, 3),
+                    "y": round(y, 3),
+                    "yaw": round(yaw, 4),
+                    "timestamp": now_iso,
+                })
+
+        except Exception as e:
+            self.get_logger().error(f"Failed to upload map data to Firebase: {e}")
+
     def scan_callback(self, msg: LaserScan):
         if not self.firebase_ready or self.db_ref is None:
             return
@@ -781,12 +923,42 @@ class RobotFirebaseBridge(Node):
         if self.frame_count % self.publish_interval != 0:
             return
 
-        # Simplistic LiDAR processing to prevent huge payload
+        # Calculate min distance AND build scan point cloud for mapping
         min_distance = float("inf")
-        for distance in msg.ranges:
-            if math.isfinite(distance) and 0.01 < distance < 12.0:
+        scan_points = []
+
+        # Get current robot pose for transforming scan points to map frame
+        pose_x, pose_y, pose_yaw = 0.0, 0.0, 0.0
+        if self.current_odom is not None:
+            pose_x = self.current_odom.pose.pose.position.x
+            pose_y = self.current_odom.pose.pose.position.y
+            q = self.current_odom.pose.pose.orientation
+            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+            pose_yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        # Downsample scan to max ~72 points (every 5th ray)
+        step = max(1, len(msg.ranges) // 72)
+        for i in range(0, len(msg.ranges), step):
+            distance = msg.ranges[i]
+            if math.isfinite(distance) and msg.range_min < distance < msg.range_max:
                 if distance < min_distance:
                     min_distance = distance
+
+                # Transform scan point to map frame
+                angle = msg.angle_min + i * msg.angle_increment
+                local_x = distance * math.cos(angle)
+                local_y = distance * math.sin(angle)
+                map_x = pose_x + local_x * math.cos(pose_yaw) - local_y * math.sin(pose_yaw)
+                map_y = pose_y + local_x * math.sin(pose_yaw) + local_y * math.cos(pose_yaw)
+                scan_points.append({
+                    "x": round(map_x, 3),
+                    "y": round(map_y, 3),
+                })
+
+        # Store scan points for periodic map upload
+        with self.map_data_lock:
+            self.latest_scan_points = scan_points
 
         data = {
             "timestamp": datetime.now().isoformat(),
