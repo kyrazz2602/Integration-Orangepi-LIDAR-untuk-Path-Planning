@@ -21,9 +21,9 @@ def generate_launch_description():
     lidar_port_arg = DeclareLaunchArgument(
         "lidar_port",
         default_value=(
-            "/dev/rplidar" if os.path.exists("/dev/rplidar") else "/dev/ttyUSB0"
+            "/dev/rplidar" if os.path.exists("/dev/rplidar") else "/dev/ttyUSB1"
         ),
-        description="Serial port for RPLidar (e.g. /dev/ttyUSB0 or /dev/ttyS1)",
+        description="Serial port for RPLidar (e.g. /dev/ttyUSB1 or /dev/ttyS1)",
     )
 
     arduino_port_arg = DeclareLaunchArgument(
