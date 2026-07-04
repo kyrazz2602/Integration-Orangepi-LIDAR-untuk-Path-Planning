@@ -11,11 +11,20 @@ def generate_launch_description():
     nav2_bringup_dir = FindPackageShare('nav2_bringup')
     slam_toolbox_dir = FindPackageShare('slam_toolbox')
     
+    # Detect LiDAR port dynamically
+    default_lidar_port = '/dev/ttyUSB1'
+    if os.path.exists('/dev/rplidar'):
+        default_lidar_port = '/dev/rplidar'
+    elif os.path.exists('/dev/ttyUSB1'):
+        default_lidar_port = '/dev/ttyUSB1'
+    elif os.path.exists('/dev/ttyUSB0'):
+        default_lidar_port = '/dev/ttyUSB0'
+
     # Declare Launch Arguments
     lidar_port_arg = DeclareLaunchArgument(
         'lidar_port',
-        default_value='/dev/rplidar' if os.path.exists('/dev/rplidar') else '/dev/ttyUSB1',
-        description='Serial port for RPLidar (e.g. /dev/ttyUSB1 or /dev/ttyS1)'
+        default_value=default_lidar_port,
+        description='Serial port for RPLidar (e.g. /dev/rplidar, /dev/ttyUSB1, or /dev/ttyUSB0)'
     )
     
     arduino_port_arg = DeclareLaunchArgument(
