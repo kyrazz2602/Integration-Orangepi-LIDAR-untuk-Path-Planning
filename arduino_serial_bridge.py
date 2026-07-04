@@ -131,10 +131,13 @@ class ArduinoBridge(Node):
             target_rpm = (abs(v) / (2.0 * math.pi * self.R)) * 60.0
         elif w > angular_threshold:
             command = "CMD,KIRI\n"
-            target_rpm = (abs(w) * self.L / (2.0 * math.pi * self.R)) * 60.0
+            # In the new Arduino firmware, turning uses differential drive where the inner wheel spins at 50% speed.
+            # Thus, outer wheel speed is 2 * w * L. Target RPM is doubled compared to the static inner wheel case.
+            target_rpm = (abs(w) * self.L / (2.0 * math.pi * self.R)) * 60.0 * 2.0
         elif w < -angular_threshold:
             command = "CMD,KANAN\n"
-            target_rpm = (abs(w) * self.L / (2.0 * math.pi * self.R)) * 60.0
+            # Same differential turning speed logic for turning right.
+            target_rpm = (abs(w) * self.L / (2.0 * math.pi * self.R)) * 60.0 * 2.0
         else:
             command = "CMD,DIAM\n"
             target_rpm = 0.0
@@ -319,12 +322,12 @@ class ArduinoBridge(Node):
         if v_sign < 0:
             v = -(v_right + v_left) / 2.0
             w = 0.0
-        elif last_w > 0.01:  # turning left
-            v = v_right / 2.0
-            w = v_right / self.L
-        elif last_w < -0.01:  # turning right
-            v = v_left / 2.0
-            w = -v_left / self.L
+        elif last_w > 0.01:  # turning left (new firmware scales left wheel by 0.5 in odometry)
+            v = (v_right + 0.5 * v_left) / 2.0
+            w = (v_right - 0.5 * v_left) / self.L
+        elif last_w < -0.01:  # turning right (new firmware scales right wheel by 0.5 in odometry)
+            v = (0.5 * v_right + v_left) / 2.0
+            w = (0.5 * v_right - v_left) / self.L
         else:
             v = (v_right + v_left) / 2.0
             w = 0.0

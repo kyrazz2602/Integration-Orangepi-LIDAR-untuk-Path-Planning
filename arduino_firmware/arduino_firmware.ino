@@ -1,19 +1,20 @@
 // ============================================
 // AIRGUARD - ARDUINO MEGA 2560 FINAL
-// Serial2 pin 16/17 → Orange Pi
-// Serial3 pin 14/15 → ESP32
+// Serial2 pin 16/17 -> Orange Pi
+// Serial3 pin 14/15 -> ESP32
 // IR Obstacle : pin 28, 29, 30 (deteksi lantai)
 // HC-SR04     : pin 31/32, 33/34, 35/36
-// WASD via Serial Monitor:
-//   W = maju, S = mundur, A = kiri, D = kanan
-//   X / spasi = diam
+//
+// CATATAN DESAIN:
+// Encoder fisik hanya punya 1 channel per roda (bukan quadrature A+B),
+// jadi deteksi arah putaran TIDAK bisa dari sensor - arah disimpulkan
+// dari modeGerak (perintah gerak yang sedang aktif), bukan dari fasa encoder.
+// PPR = 233 hasil kalibrasi manual (putar roda 10x, hitung pulsa, bagi 10).
 // ============================================
 
-// === PIN ENCODER ===
+// === PIN ENCODER (single-channel) ===
 #define ENC_KANAN_A 3
-#define ENC_KANAN_B 2
 #define ENC_KIRI_A 18
-#define ENC_KIRI_B 19
 
 // === PIN BTS7960 KIRI ===
 #define RPWM_KIRI 8
@@ -59,9 +60,10 @@
 #define MODE_OTONOM 1
 int modeOperasi = MODE_MANUAL;
 
-// === PID PARAMETER ===
+// === PID PARAMETER (FINAL - hasil tuning, tidak lagi live-adjustable) ===
+// GANTI nilai di bawah ini dengan hasil tuning final dari sesi live-tuning.
 const float Kp = 0.15;
-const float Ki = 0;
+const float Ki = 0.02;
 const float Kd = 0.1;
 const float pwmBase = 120.0;
 
@@ -71,13 +73,13 @@ float targetRPMKanan = 0.0;
 float targetRPMKiri = 0.0;
 
 // === PWM BASE PER RODA ===
-float pwmBaseKanan = 80.0;
-float pwmBaseKiri = 80.0;
+float pwmBaseKanan = 120.0;
+float pwmBaseKiri = 120.0;
 
-// === ENCODER ===
+// === ENCODER single-channel (untuk odometri & RPM) ===
 volatile long pulseKanan = 0;
 volatile long pulseKiri = 0;
-const float PPR = 241.0 * 4.0;
+const float PPR = 234.0; // hasil kalibrasi manual
 
 // === ODOMETRI ===
 float odomX = 0.0;
@@ -85,8 +87,8 @@ float odomY = 0.0;
 float odomTheta = 0.0;
 float jarakKanan = 0.0;
 float jarakKiri = 0.0;
-const float WHEEL_DIAMETER = 6.5;
-const float WHEEL_BASE = 7.0;
+const float WHEEL_DIAMETER = 6.5; // cm - ukur ulang sesuai roda fisik
+const float WHEEL_BASE = 7.0;     // cm - ukur ulang jarak antar roda
 
 // === PID VARIABLE - KANAN ===
 float errorKanan = 0;
@@ -115,13 +117,13 @@ unsigned long lastPrint = 0;
 unsigned long lastOdom = 0;
 unsigned long lastSensor = 0;
 const int intervalPID = 100;
-const int intervalPrint = 200;
+const int intervalPrint = 500;
 const int intervalOdom = 100;
 const int intervalSensor = 100;
 
 // === STATUS ===
 bool motorJalan = false;
-int modeGerak = 0;
+int modeGerak = 0; // 0=maju, 1=mundur, 2=kanan, 3=kiri
 int sumberPerintah = 0;
 
 // === DATA SENSOR HALANGAN ===
@@ -134,50 +136,29 @@ bool irKananS = false;
 
 // ============================================
 // CEK BLOK ARAH
+// HC-SR04 : blocked jika jarak <= JARAK_STOP (ada tembok)
+// IR      : blocked jika lantai TIDAK terdeteksi (jurang)
 // ============================================
 bool blockedDepan() { return (jarakDepan <= JARAK_STOP) || !irTengah; }
 bool blockedKiri() { return (jarakKiriS <= JARAK_STOP) || !irKiri; }
 bool blockedKanan() { return (jarakKananS <= JARAK_STOP) || !irKananS; }
 
 // ============================================
-// INTERRUPT ENCODER
+// ISR ENCODER - single channel, hanya hitung pulsa
+// Arah TIDAK ditentukan di sini, tapi disimpulkan dari modeGerak
+// di updateOdometri() dan eksekusiPerintah()
 // ============================================
-void encoderKananA() {
-  if (digitalRead(ENC_KANAN_A) == digitalRead(ENC_KANAN_B))
-    pulseKanan--;
-  else
-    pulseKanan++;
-}
-void encoderKananB() {
-  if (digitalRead(ENC_KANAN_A) == digitalRead(ENC_KANAN_B))
-    pulseKanan++;
-  else
-    pulseKanan--;
-}
-void encoderKiriA() {
-  if (digitalRead(ENC_KIRI_A) == digitalRead(ENC_KIRI_B))
-    pulseKiri--;
-  else
-    pulseKiri++;
-}
-void encoderKiriB() {
-  if (digitalRead(ENC_KIRI_A) == digitalRead(ENC_KIRI_B))
-    pulseKiri++;
-  else
-    pulseKiri--;
-}
+void encKananA() { pulseKanan++; }
+void encKiriA() { pulseKiri++; }
 
-// ============================================
-// RESET PID
 // ============================================
 void resetPID() {
   integralKanan = integralKiri = 0;
   lastErrorKanan = lastErrorKiri = 0;
 }
 
-// ============================================
-// STOP MOTOR
-// ============================================
+void resetOdom() { odomX = odomY = odomTheta = jarakKanan = jarakKiri = 0.0; }
+
 void stopMotor() {
   motorJalan = false;
   analogWrite(RPWM_KANAN, 0);
@@ -186,10 +167,18 @@ void stopMotor() {
   analogWrite(LPWM_KIRI, 0);
   outputKanan = outputKiri = 0;
   resetPID();
+  while (odomTheta > PI)
+    odomTheta -= 2.0 * PI;
+  while (odomTheta < -PI)
+    odomTheta += 2.0 * PI;
 }
 
 // ============================================
 // HITUNG LEVEL POLUTAN
+// PM2.5: <=35.4 Baik, >35.4-<125.5 Perhatian, >=125.5 Bahaya
+// PM10 : <=154  Baik, >154-<355   Perhatian, >=355   Bahaya
+// CO   : <=15   Baik, >15-<50     Perhatian, >=50    Bahaya
+// VOC  : <=0.3  Baik, >0.3-<1.0   Perhatian, >=1.0   Bahaya  (mg/m3)
 // ============================================
 int hitungLevel(float pm25, float pm10, float co, float voc) {
   int level = 1;
@@ -205,16 +194,13 @@ int hitungLevel(float pm25, float pm10, float co, float voc) {
     level = max(level, 3);
   else if (co > 15)
     level = max(level, 2);
-  if (voc >= 100)
+  if (voc >= 1.0)
     level = max(level, 3);
-  else if (voc > 20)
+  else if (voc > 0.3)
     level = max(level, 2);
   return level;
 }
 
-// ============================================
-// SET KIPAS
-// ============================================
 void setKipas(int speed) {
   fanSpeed = speed;
   if (speed == 0) {
@@ -227,9 +213,6 @@ void setKipas(int speed) {
   analogWrite(FAN_PWM_PIN, speed);
 }
 
-// ============================================
-// UPDATE AUTO KIPAS
-// ============================================
 void updateAutoKipas() {
   if (!modeAuto)
     return;
@@ -245,8 +228,6 @@ void updateAutoKipas() {
     setKipas(FAN_LOW);
 }
 
-// ============================================
-// EKSEKUSI PERINTAH KIPAS
 // ============================================
 bool eksekusiFan(String cmd) {
   if (cmd.startsWith("MANUAL:")) {
@@ -358,12 +339,10 @@ void eksekusiPerintah(String cmd) {
     resetPID();
     Serial2.println("ACK:MUNDUR");
   } else if (cmd == "CMD,KANAN") {
+    // Belok kanan diferensial: roda kanan (dalam) melambat, roda kiri (luar)
+    // tetap target penuh
     if (blockedKanan()) {
       Serial2.println("EVT:BLOCKED_KANAN");
-      return;
-    }
-    if (motorJalan && modeGerak == 2) {
-      Serial2.println("ACK:KANAN");
       return;
     }
     motorJalan = true;
@@ -375,12 +354,10 @@ void eksekusiPerintah(String cmd) {
     resetPID();
     Serial2.println("ACK:KANAN");
   } else if (cmd == "CMD,KIRI") {
+    // Belok kiri diferensial: roda kiri (dalam) melambat, roda kanan (luar)
+    // tetap target penuh
     if (blockedKiri()) {
       Serial2.println("EVT:BLOCKED_KIRI");
-      return;
-    }
-    if (motorJalan && modeGerak == 3) {
-      Serial2.println("ACK:KIRI");
       return;
     }
     motorJalan = true;
@@ -402,13 +379,11 @@ void eksekusiPerintah(String cmd) {
       Serial2.println(targetRPM, 0);
     }
   } else if (cmd == "RESET,ODOM") {
-    odomX = odomY = odomTheta = jarakKanan = jarakKiri = 0;
+    resetOdom();
     Serial2.println("ACK:RESET_ODOM");
   }
 }
 
-// ============================================
-// BACA SERIAL MONITOR (+ WASD)
 // ============================================
 void bacaSerialMonitor() {
   if (!Serial.available())
@@ -418,37 +393,10 @@ void bacaSerialMonitor() {
   if (input.length() == 0)
     return;
   sumberPerintah = 0;
-
-  // === HANDLER WASD (single char) ===
-  if (input.length() == 1) {
-    char c = tolower(input.charAt(0));
-    String mapped = "";
-    if (c == 'w')
-      mapped = "CMD,MAJU";
-    else if (c == 's')
-      mapped = "CMD,MUNDUR";
-    else if (c == 'a')
-      mapped = "CMD,KIRI";
-    else if (c == 'd')
-      mapped = "CMD,KANAN";
-    else if (c == 'x' || c == ' ')
-      mapped = "CMD,DIAM";
-
-    if (mapped.length() > 0) {
-      Serial.println("[WASD] " + input + " -> " + mapped);
-      eksekusiPerintah(mapped);
-      return;
-    }
-  }
-
-  // === COMMAND BIASA ===
   Serial.println("[TEST] " + input);
   eksekusiPerintah(input);
 }
 
-// ============================================
-// BACA ORANGE PI
-// ============================================
 void bacaOrangePi() {
   if (!Serial2.available())
     return;
@@ -456,14 +404,19 @@ void bacaOrangePi() {
   input.trim();
   if (input.length() == 0)
     return;
+
+  static unsigned long lastCmd = 0;
+  static String lastInput = "";
+  if (input == lastInput && millis() - lastCmd < 80)
+    return;
+  lastCmd = millis();
+  lastInput = input;
+
   sumberPerintah = 1;
   Serial.println("[OPI] " + input);
   eksekusiPerintah(input);
 }
 
-// ============================================
-// BACA ESP32 + FORWARD WIFI KE ORANGE PI
-// ============================================
 void bacaESP32() {
   if (!Serial3.available())
     return;
@@ -471,34 +424,13 @@ void bacaESP32() {
   input.trim();
   if (input.length() == 0)
     return;
-  Serial.println("[ESP32] " + input);
-
-  if (input.startsWith("DATA,")) {
-    // Format: DATA,pm25,pm10,co,voc,suhu,voltage,percent
-    int comma1 = input.indexOf(',');
-    int comma2 = input.indexOf(',', comma1 + 1);
-    int comma3 = input.indexOf(',', comma2 + 1);
-    int comma4 = input.indexOf(',', comma3 + 1);
-    int comma5 = input.indexOf(',', comma4 + 1);
-
-    if (comma1 > 0 && comma2 > 0 && comma3 > 0 && comma4 > 0) {
-      last_pm25 = input.substring(comma1 + 1, comma2).toFloat();
-      last_pm10 = input.substring(comma2 + 1, comma3).toFloat();
-      last_co = input.substring(comma3 + 1, comma4).toFloat();
-      if (comma5 > 0) {
-        last_voc = input.substring(comma4 + 1, comma5).toFloat();
-      } else {
-        last_voc = input.substring(comma4 + 1).toFloat();
-      }
-      modeAuto = true; // Automatically enable auto mode when receiving direct offline data
-    }
-  }
+  sumberPerintah = 2;
+  Serial.println("[ESP] " + input);
+  eksekusiPerintah(input);
 }
 
 // ============================================
-// BACA HC-SR04 (dengan koreksi kalibrasi)
-// ============================================
-float bacaJarak(int trigPin, int echoPin, float koefRegresi) {
+float bacaJarak(int trigPin, int echoPin, float koef) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
   digitalWrite(trigPin, HIGH);
@@ -507,13 +439,9 @@ float bacaJarak(int trigPin, int echoPin, float koefRegresi) {
   long dur = pulseIn(echoPin, HIGH, 30000);
   if (dur == 0)
     return 999.0;
-  float raw = dur * 0.0343 / 2.0;
-  return raw / koefRegresi;
+  return (dur * 0.0343 / 2.0) / koef;
 }
 
-// ============================================
-// BACA SEMUA SENSOR HALANGAN
-// ============================================
 void bacaSensorHalangan() {
   jarakDepan = bacaJarak(TRIG_DEPAN, ECHO_DEPAN, 0.9915);
   jarakKiriS = bacaJarak(TRIG_KIRI, ECHO_KIRI, 1.0377);
@@ -549,7 +477,6 @@ void bacaSensorHalangan() {
 
   if (!adaHalangan)
     return;
-
   stopMotor();
   if (modeOperasi == MODE_MANUAL)
     Serial2.println("EVT:OBSTACLE_STOP");
@@ -558,7 +485,7 @@ void bacaSensorHalangan() {
 }
 
 // ============================================
-// PID
+// PID (konstanta final, tidak bisa diubah live)
 // ============================================
 float hitungPID(float target, float rpm, float &integral, float &lastError,
                 float &errOut, float base) {
@@ -571,9 +498,6 @@ float hitungPID(float target, float rpm, float &integral, float &lastError,
   return constrain(out, 0, 255);
 }
 
-// ============================================
-// SET MOTOR
-// ============================================
 void setMotorKanan(int pwm, bool maju) {
   pwm = constrain(pwm, 0, 255);
   if (maju) {
@@ -596,12 +520,9 @@ void setMotorKiri(int pwm, bool maju) {
   }
 }
 
-// ============================================
-// GERAKKAN MOTOR
-// ============================================
 void gerakkanMotor() {
   switch (modeGerak) {
-  case 0:
+  case 0: // maju
     outputKanan = hitungPID(targetRPMKanan, rpmKanan, integralKanan,
                             lastErrorKanan, errorKanan, pwmBaseKanan);
     outputKiri = hitungPID(targetRPMKiri, rpmKiri, integralKiri, lastErrorKiri,
@@ -609,7 +530,7 @@ void gerakkanMotor() {
     setMotorKanan((int)outputKanan, true);
     setMotorKiri((int)outputKiri, true);
     break;
-  case 1:
+  case 1: // mundur
     outputKanan = hitungPID(targetRPMKanan, rpmKanan, integralKanan,
                             lastErrorKanan, errorKanan, pwmBaseKanan);
     outputKiri = hitungPID(targetRPMKiri, rpmKiri, integralKiri, lastErrorKiri,
@@ -617,38 +538,44 @@ void gerakkanMotor() {
     setMotorKanan((int)outputKanan, false);
     setMotorKiri((int)outputKiri, false);
     break;
-  case 2:
-    outputKiri = hitungPID(targetRPMKiri, rpmKiri, integralKiri, lastErrorKiri,
-                           errorKiri, pwmBaseKiri);
-    setMotorKanan(0, true);
-    setMotorKiri((int)outputKiri, true);
-    break;
-  case 3:
+  case 2: // belok kanan (diferensial)
     outputKanan = hitungPID(targetRPMKanan, rpmKanan, integralKanan,
                             lastErrorKanan, errorKanan, pwmBaseKanan);
+    outputKiri = hitungPID(targetRPMKiri, rpmKiri, integralKiri, lastErrorKiri,
+                           errorKiri, pwmBaseKiri);
     setMotorKanan((int)outputKanan, true);
-    setMotorKiri(0, true);
+    setMotorKiri((int)outputKiri, true);
+    break;
+  case 3: // belok kiri (diferensial)
+    outputKanan = hitungPID(targetRPMKanan, rpmKanan, integralKanan,
+                            lastErrorKanan, errorKanan, pwmBaseKanan);
+    outputKiri = hitungPID(targetRPMKiri, rpmKiri, integralKiri, lastErrorKiri,
+                           errorKiri, pwmBaseKiri);
+    setMotorKanan((int)outputKanan, true);
+    setMotorKiri((int)outputKiri, true);
     break;
   }
 }
 
 // ============================================
-// UPDATE ODOMETRI
+// ODOMETRI - single channel, arah dari modeGerak
+// (encoder tidak bisa mendeteksi arah sendiri, jadi tanda +/- ditentukan
+//  dari mode gerak yang sedang aktif, BUKAN dari sensor)
 // ============================================
 void updateOdometri(long pK, long pL) {
-  float dK = (abs(pK) / PPR) * (PI * WHEEL_DIAMETER);
-  float dL = (abs(pL) / PPR) * (PI * WHEEL_DIAMETER);
+  float dK = (pK / PPR) * (PI * WHEEL_DIAMETER);
+  float dL = (pL / PPR) * (PI * WHEEL_DIAMETER);
 
   if (modeGerak == 1) {
     dK = -dK;
     dL = -dL;
-  }
+  } // mundur
   if (modeGerak == 2) {
-    dK = 0;
-  }
+    dK = dK * 0.5;
+  } // belok kanan, roda kanan lebih lambat
   if (modeGerak == 3) {
-    dL = 0;
-  }
+    dL = dL * 0.5;
+  } // belok kiri, roda kiri lebih lambat
 
   jarakKanan += dK;
   jarakKiri += dL;
@@ -657,13 +584,15 @@ void updateOdometri(long pK, long pL) {
   float dTheta = (dK - dL) / WHEEL_BASE;
 
   odomTheta += dTheta;
+  while (odomTheta > PI)
+    odomTheta -= 2.0 * PI;
+  while (odomTheta < -PI)
+    odomTheta += 2.0 * PI;
+
   odomX += dCenter * cos(odomTheta);
   odomY += dCenter * sin(odomTheta);
 }
 
-// ============================================
-// KIRIM ODOMETRI KE ORANGE PI
-// ============================================
 void kirimOdometri() {
   Serial2.print("ODOM,");
   Serial2.print(odomX, 2);
@@ -683,16 +612,13 @@ void kirimOdometri() {
 void setup() {
   Serial.begin(115200);
   Serial2.begin(115200);
+  Serial2.setTimeout(50);
   Serial3.begin(115200);
 
   pinMode(ENC_KANAN_A, INPUT_PULLUP);
-  pinMode(ENC_KANAN_B, INPUT_PULLUP);
   pinMode(ENC_KIRI_A, INPUT_PULLUP);
-  pinMode(ENC_KIRI_B, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENC_KANAN_A), encoderKananA, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_KANAN_B), encoderKananB, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_KIRI_A), encoderKiriA, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_KIRI_B), encoderKiriB, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_KANAN_A), encKananA, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_KIRI_A), encKiriA, RISING);
 
   pinMode(RPWM_KIRI, OUTPUT);
   pinMode(LPWM_KIRI, OUTPUT);
@@ -730,8 +656,8 @@ void setup() {
   pinMode(TRIG_KANAN, OUTPUT);
   pinMode(ECHO_KANAN, INPUT);
 
-  Serial.println("=== AIRGUARD SIAP ===");
-  Serial.println("WASD: W=maju S=mundur A=kiri D=kanan X=diam");
+  Serial.println("AirGuard ready. Single-channel encoder, PPR=233, PID final "
+                 "(no live tuning).");
 }
 
 // ============================================
@@ -752,32 +678,32 @@ void loop() {
 
   if (now - lastPrint >= intervalPrint) {
     lastPrint = now;
-
-    Serial.print("HCSR Depan:");
+    Serial.print("Depan:");
     Serial.print(jarakDepan, 1);
-    Serial.print("cm");
     Serial.print(blockedDepan() ? "(BLOCK)" : "(OK)");
-    Serial.print(" | Kiri:");
+    Serial.print(" Kiri:");
     Serial.print(jarakKiriS, 1);
-    Serial.print("cm");
     Serial.print(blockedKiri() ? "(BLOCK)" : "(OK)");
-    Serial.print(" | Kanan:");
+    Serial.print(" Kanan:");
     Serial.print(jarakKananS, 1);
-    Serial.print("cm");
     Serial.println(blockedKanan() ? "(BLOCK)" : "(OK)");
-
-    Serial.print("IR Kiri:");
+    Serial.print("IR K:");
     Serial.print(irKiri ? "LANTAI" : "JURANG");
-    Serial.print(" | Tengah:");
+    Serial.print(" T:");
     Serial.print(irTengah ? "LANTAI" : "JURANG");
-    Serial.print(" | Kanan:");
+    Serial.print(" Kn:");
     Serial.println(irKananS ? "LANTAI" : "JURANG");
-    Serial.println("----------------------------");
-
     Serial.print("RPM Kanan:");
     Serial.print(rpmKanan, 1);
     Serial.print(" | RPM Kiri:");
     Serial.println(rpmKiri, 1);
+    Serial.print("Odom X:");
+    Serial.print(odomX, 2);
+    Serial.print(" Y:");
+    Serial.print(odomY, 2);
+    Serial.print(" Theta:");
+    Serial.println(odomTheta, 4);
+    Serial.println("---");
   }
 
   if (now - lastPID >= intervalPID) {
@@ -792,8 +718,8 @@ void loop() {
     pulseKiri = 0;
     interrupts();
 
-    rpmKanan = (abs(pK) / PPR) / dt * 60.0;
-    rpmKiri = (abs(pL) / PPR) / dt * 60.0;
+    rpmKanan = (pK / PPR) / dt * 60.0;
+    rpmKiri = (pL / PPR) / dt * 60.0;
 
     if (motorJalan) {
       updateOdometri(pK, pL);
