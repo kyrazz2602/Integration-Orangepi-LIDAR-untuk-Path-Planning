@@ -154,6 +154,7 @@ class RobotFirebaseBridge(Node):
         self.latest_battery_percent = 0
         self.nav_status = "IDLE"
         self.current_speed_cmd = "OFF"
+        self.is_auto_mode = True
 
         self.esp_ser_lock = threading.Lock()
         self.esp_ser = None
@@ -302,7 +303,7 @@ class RobotFirebaseBridge(Node):
                             self._upload_sensor_data_to_firebase()
                             
                             # If AUTO mode is active, send updated AUTO:pm25:pm10:co:voc to Mega
-                            if self.current_speed_cmd == "AUTO":
+                            if self.is_auto_mode:
                                 self._update_fan_command()
 
                             error_count = 0
@@ -350,17 +351,19 @@ class RobotFirebaseBridge(Node):
     def _update_fan_command(self):
         """Publish the appropriate command string to /fan_cmd"""
         msg = String()
-        if self.current_speed_cmd == "AUTO":
+        if self.is_auto_mode:
             msg.data = f"AUTO:{self.latest_pm25:.1f}:{self.latest_pm10:.1f}:{self.latest_co:.1f}:{self.latest_voc:.4f}"
+            speed_val = "AUTO"
         else:
             msg.data = f"MANUAL:{self.current_speed_cmd}"
+            speed_val = self.current_speed_cmd
 
         self.fan_cmd_pub.publish(msg)
         self.get_logger().info(f"Published to /fan_cmd: {msg.data}")
 
         if self.firebase_ready and self.db_ref is not None:
             try:
-                self.db_ref.child("Status").update({"kipas": self.current_speed_cmd})
+                self.db_ref.child("Status").update({"kipas": speed_val})
             except Exception as e:
                 self.get_logger().error(f"Failed to update Status/kipas in Firebase: {e}")
 
@@ -458,6 +461,15 @@ class RobotFirebaseBridge(Node):
             speed = str(data).upper()
             self._process_speed_command(speed)
 
+        # 2.1 Handle change to auto mode command
+        elif path == "/isAutoMode":
+            self.is_auto_mode = bool(data)
+            self._update_fan_command()
+
+        # 2.2 Handle map action (SAVE / LOAD) from dashboard
+        elif path == "/map_action" and isinstance(data, dict):
+            self._handle_map_action(data)
+
         # 3. Handle WiFi configuration trigger directly
         elif path == "/wifi/trigger":
             if data is True or str(data).lower() in ["true", "1"]:
@@ -506,6 +518,13 @@ class RobotFirebaseBridge(Node):
             if "speed" in data and data["speed"] is not None:
                 speed = str(data["speed"]).upper()
                 self._process_speed_command(speed)
+
+            if "isAutoMode" in data and data["isAutoMode"] is not None:
+                self.is_auto_mode = bool(data["isAutoMode"])
+                self._update_fan_command()
+
+            if "map_action" in data and isinstance(data["map_action"], dict):
+                self._handle_map_action(data["map_action"])
 
             if "save_map" in data and (data["save_map"] is True or str(data["save_map"]).lower() in ["true", "1"]):
                 self.get_logger().info("Manual map save command received from Firebase (bulk)!")
@@ -1019,6 +1038,199 @@ class RobotFirebaseBridge(Node):
             self.get_logger().error("Map auto-save timeout expired!")
         except Exception as e:
             self.get_logger().error(f"Error during auto-save: {e}")
+
+    def _handle_map_action(self, action_data: dict):
+        action = action_data.get("action")
+        status = action_data.get("status")
+        map_name = action_data.get("mapName", "")
+        timestamp = action_data.get("timestamp", int(time.time() * 1000))
+
+        if status == "PENDING":
+            if action == "SAVE":
+                self.get_logger().info(f"Firebase map action SAVE received for '{map_name}'")
+                threading.Thread(
+                    target=self._save_map_action_worker,
+                    args=(map_name, timestamp),
+                    daemon=True
+                ).start()
+            elif action == "LOAD":
+                self.get_logger().info(f"Firebase map action LOAD received for '{map_name}'")
+                threading.Thread(
+                    target=self._load_map_action_worker,
+                    args=(map_name,),
+                    daemon=True
+                ).start()
+
+    def _save_map_action_worker(self, map_name: str, timestamp: int):
+        try:
+            import subprocess
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            maps_dir = os.path.join(script_dir, "maps")
+            os.makedirs(maps_dir, exist_ok=True)
+
+            map_id = f"map_{timestamp}"
+            map_path = os.path.join(maps_dir, map_id)
+
+            self.get_logger().info(f"Saving map locally to: {map_path}")
+
+            # 1. Save standard map using map_saver_cli
+            cmd = ["ros2", "run", "nav2_map_server", "map_saver_cli", "-f", map_path]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=12.0)
+
+            # 2. Save using slam_toolbox serialize service (saves pose graph)
+            try:
+                cmd_toolbox = [
+                    "ros2", "service", "call",
+                    "/slam_toolbox/save_map",
+                    "slam_toolbox/srv/SaveMap",
+                    f"{{name: {{data: '{map_path}'}}}}"
+                ]
+                subprocess.run(cmd_toolbox, capture_output=True, text=True, timeout=8.0)
+            except Exception as e:
+                self.get_logger().warning(f"Slam toolbox serialize service warning: {e}")
+
+            if res.returncode == 0:
+                self.get_logger().info(f"✓ Map saved successfully to {map_path}")
+                
+                # 3. Create grid base64 representation to upload to SavedMaps
+                # Get the map data from memory
+                with self.map_data_lock:
+                    map_msg = self.latest_map_data
+
+                grid_ref_data = None
+                if map_msg is not None:
+                    info = map_msg.info
+                    width = info.width
+                    height = info.height
+                    resolution = info.resolution
+                    origin_x = info.origin.position.x
+                    origin_y = info.origin.position.y
+
+                    # Downsample by factor of 4
+                    ds_factor = 4
+                    ds_w = width // ds_factor
+                    ds_h = height // ds_factor
+
+                    grid_data = map_msg.data
+                    ds_cells = []
+                    for row in range(ds_h):
+                        for col in range(ds_w):
+                            src_row = row * ds_factor + ds_factor // 2
+                            src_col = col * ds_factor + ds_factor // 2
+                            if src_row < height and src_col < width:
+                                val = grid_data[src_row * width + src_col]
+                            else:
+                                val = -1
+                            ds_cells.append(val)
+
+                    byte_data = bytes([(v + 128) & 0xFF for v in ds_cells])
+                    grid_b64 = base64.b64encode(byte_data).decode('ascii')
+
+                    grid_ref_data = {
+                        "width": ds_w,
+                        "height": ds_h,
+                        "resolution": round(resolution * ds_factor, 4),
+                        "origin_x": round(origin_x, 4),
+                        "origin_y": round(origin_y, 4),
+                        "data_b64": grid_b64,
+                    }
+
+                # 4. Write to SavedMaps in Firebase
+                if self.firebase_ready and self.db_ref is not None:
+                    saved_map_entry = {
+                        "id": map_id,
+                        "name": map_name,
+                        "timestamp": timestamp,
+                    }
+                    if grid_ref_data is not None:
+                        saved_map_entry["grid"] = grid_ref_data
+
+                    self.db_ref.child("SavedMaps").child(map_id).set(saved_map_entry)
+                    self.db_ref.child("Command").child("map_action").update({
+                        "status": "SUCCESS"
+                    })
+                    self.get_logger().info(f"✓ Uploaded saved map details to /SavedMaps/{map_id}")
+            else:
+                self.get_logger().error(f"Failed to save map: {res.stderr}")
+                if self.firebase_ready and self.db_ref is not None:
+                    self.db_ref.child("Command").child("map_action").update({
+                        "status": "ERROR"
+                    })
+        except Exception as e:
+            self.get_logger().error(f"Error during save map action: {e}")
+            if self.firebase_ready and self.db_ref is not None:
+                try:
+                    self.db_ref.child("Command").child("map_action").update({
+                        "status": "ERROR"
+                    })
+                except Exception:
+                    pass
+
+    def _load_map_action_worker(self, map_name: str):
+        try:
+            # 1. Query Firebase SavedMaps to find the map with this name
+            if not self.firebase_ready or self.db_ref is None:
+                self.get_logger().error("Firebase not ready for load map action.")
+                return
+
+            saved_maps = self.db_ref.child("SavedMaps").get()
+            map_id = None
+            if isinstance(saved_maps, dict):
+                for key, val in saved_maps.items():
+                    if isinstance(val, dict) and val.get("name") == map_name:
+                        map_id = val.get("id") or key
+                        break
+
+            if not map_id:
+                self.get_logger().error(f"Map with name '{map_name}' not found in SavedMaps.")
+                self.db_ref.child("Command").child("map_action").update({
+                    "status": "ERROR"
+                })
+                return
+
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            maps_dir = os.path.join(script_dir, "maps")
+            map_path = os.path.join(maps_dir, map_id)
+
+            # Check if file exists. SLAM toolbox looks for .posegraph file
+            posegraph_file = f"{map_path}.posegraph"
+            if not os.path.exists(posegraph_file):
+                self.get_logger().error(f"Posegraph file '{posegraph_file}' not found on local disk.")
+                self.db_ref.child("Command").child("map_action").update({
+                    "status": "ERROR"
+                })
+                return
+
+            # 2. Call deserialize_map service of slam_toolbox
+            import subprocess
+            cmd = [
+                "ros2", "service", "call",
+                "/slam_toolbox/deserialize_map",
+                "slam_toolbox/srv/DeserializePoseGraph",
+                f"{{filename: '{map_path}', match_type: 1, initial_pose: {{position: {{x: 0.0, y: 0.0, z: 0.0}}, orientation: {{x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}}}}"
+            ]
+            self.get_logger().info(f"Loading map via SLAM Toolbox: {' '.join(cmd)}")
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15.0)
+
+            if res.returncode == 0:
+                self.get_logger().info(f"✓ Map '{map_name}' loaded successfully via SLAM Toolbox")
+                self.db_ref.child("Command").child("map_action").update({
+                    "status": "SUCCESS"
+                })
+            else:
+                self.get_logger().error(f"Failed to load map: {res.stderr}")
+                self.db_ref.child("Command").child("map_action").update({
+                    "status": "ERROR"
+                })
+        except Exception as e:
+            self.get_logger().error(f"Error during load map action: {e}")
+            if self.firebase_ready and self.db_ref is not None:
+                try:
+                    self.db_ref.child("Command").child("map_action").update({
+                        "status": "ERROR"
+                    })
+                except Exception:
+                    pass
 
 
 def main(args=None):
