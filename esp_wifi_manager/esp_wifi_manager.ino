@@ -31,7 +31,15 @@ float dht_b = -0.2831;
 // ================= MQ SENSOR =================
 #define MQ7_PIN 35
 #define MQ135_PIN 34
-#define VD_FACTOR 2.0
+
+// --- Voltage divider MQ sensor: R1=1k (dari output sensor), R2=2k (ke GND, ke
+// ADC) ---
+float R1_mq = 1000.0;
+float R2_mq = 2000.0;
+// VD_FACTOR = (R1+R2)/R2 -> dipakai buat "naikkan balik" tegangan hasil bagi ke
+// tegangan asli sensor
+#define VD_FACTOR ((R1_mq + R2_mq) / R2_mq) // = 1.5
+
 #define VREF 3.3
 #define VCC_MQ 5.0
 #define ADC_MAX 4095.0
@@ -46,9 +54,20 @@ float mq135_r0 = 46.44;
 float mq135_a = 0.0334;
 float mq135_b = -1.732;
 
+// ================= SENSOR ARUS (ACS712-30A) =================
+#define ACS712_PIN 33
+
+// --- Voltage divider ACS712: R1=1k (dari OUT sensor), R2=2k (ke GND, ke ADC)
+// --- Pakai VD_FACTOR yang sama karena rasio pembagi identik dengan MQ sensor
+// (1k:2k)
+float acs_offset = 2.5;        // tegangan tengah saat arus = 0A
+float acs_sensitivity = 0.066; // 66 mV/A untuk tipe 30A
+float arus_final = 0;
+
 AverageValue<float> avgCO(10);
 AverageValue<float> avgVOC(10);
 AverageValue<float> avgBattery(50);
+AverageValue<float> avgArus(10);
 
 // ================= SDS011 =================
 SDS011 sds;
@@ -83,7 +102,6 @@ String modeRobot = "-";
 bool sedangNavigasi = false;
 unsigned long lastNavUpdate = 0;
 #define NAV_TIMEOUT 5000
-bool opiOnline = false;
 
 // ================= SERIAL2 KE ORANGE PI =================
 #define RXD2 26
@@ -143,6 +161,15 @@ float bacaVOC() {
   return mq135_a * pow(rs_mq135 / mq135_r0, mq135_b);
 }
 
+// ================= FUNGSI ARUS (ACS712-30A) =================
+float bacaArus() {
+  int adc = analogRead(ACS712_PIN);
+  float vout_esp = (adc / ADC_MAX) * VREF;
+  float vout_real = vout_esp * VD_FACTOR; // kembalikan ke tegangan asli sensor
+  float arus = (vout_real - acs_offset) / acs_sensitivity;
+  return arus;
+}
+
 // ================= KIRIM DATA SENSOR KE ORANGE PI =================
 void kirimSensorKeOrangePi() {
   if (millis() - lastSensorUpload < SENSOR_UPLOAD_INTERVAL)
@@ -152,59 +179,9 @@ void kirimSensorKeOrangePi() {
   String data = "DATA," + String(pm25, 1) + "," + String(pm10, 1) + "," +
                 String(co_final, 2) + "," + String(voc_final, 3) + "," +
                 String(suhu_final, 1) + "," + String(batteryVoltage, 2) + "," +
-                String(batteryPercent);
-
-  if (opiOnline) {
-    Serial2.println(data);
-    Serial.println("[KIRIM - OPI] " + data);
-  } else {
-    Serial2.println(data); // Also send to Orange Pi
-    Serial.println(data);  // Send directly to Arduino Serial3 via TX0
-  }
-}
-
-// ================= TERIMA STATUS NAVIGASI DARI ORANGE PI =================
-void terimaDariOrangePi() {
-  while (Serial2.available()) {
-    String line = Serial2.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0)
-      continue;
-
-    Serial.println("[TERIMA] " + line);
-
-    if (line.startsWith("NAV,")) {
-      int firstComma = line.indexOf(',');
-      int secondComma = line.indexOf(',', firstComma + 1);
-      int thirdComma = line.indexOf(',', secondComma + 1);
-
-      if (secondComma > 0) {
-        statusNavigasi = line.substring(firstComma + 1, secondComma);
-        if (thirdComma > 0) {
-          modeRobot = line.substring(secondComma + 1, thirdComma);
-          String onlineStr = line.substring(thirdComma + 1);
-          onlineStr.trim();
-          opiOnline = (onlineStr == "1" || onlineStr.equalsIgnoreCase("online"));
-        } else {
-          modeRobot = line.substring(secondComma + 1);
-          opiOnline = false;
-        }
-      } else {
-        statusNavigasi = line.substring(firstComma + 1);
-        opiOnline = false;
-      }
-      lastNavUpdate = millis();
-
-      statusNavigasi.toUpperCase();
-      sedangNavigasi = (statusNavigasi != "IDLE" && statusNavigasi != "STOP");
-    }
-  }
-
-  if (millis() - lastNavUpdate > NAV_TIMEOUT) {
-    statusNavigasi = "OFFLINE";
-    sedangNavigasi = false;
-    opiOnline = false;
-  }
+                String(batteryPercent) + "," + String(arus_final, 2);
+  Serial2.println(data);
+  Serial.println("[KIRIM] " + data);
 }
 
 // ================= FUNGSI TAMPIL LCD =================
@@ -273,6 +250,59 @@ void tampilLCD() {
     lcd.print(batteryVoltage, 2);
     lcd.print("V");
     break;
+  case 4:
+    lcd.setCursor(0, 0);
+    lcd.print("Arus Sistem:");
+    lcd.setCursor(0, 1);
+    lcd.print(arus_final, 2);
+    lcd.print(" A");
+    break;
+  }
+}
+
+// ================= TERIMA STATUS NAVIGASI DARI ORANGE PI =================
+void terimaDariOrangePi() {
+  while (Serial2.available()) {
+    String line = Serial2.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0)
+      continue;
+
+    Serial.println("[TERIMA] " + line);
+
+    if (line.startsWith("NAV,")) {
+      int firstComma = line.indexOf(',');
+      int secondComma = line.indexOf(',', firstComma + 1);
+
+      String statusBaru;
+      if (secondComma > 0) {
+        statusBaru = line.substring(firstComma + 1, secondComma);
+        modeRobot = line.substring(secondComma + 1);
+      } else {
+        statusBaru = line.substring(firstComma + 1);
+      }
+      statusBaru.toUpperCase();
+
+      bool statusBerubah = (statusBaru != statusNavigasi);
+
+      statusNavigasi = statusBaru;
+      lastNavUpdate = millis();
+      sedangNavigasi = (statusNavigasi != "IDLE" && statusNavigasi != "STOP");
+
+      if (statusBerubah) {
+        tampilLCD();
+        lastLcdSwitch = millis();
+      }
+    }
+  }
+
+  if (millis() - lastNavUpdate > NAV_TIMEOUT) {
+    if (statusNavigasi != "OFFLINE") {
+      statusNavigasi = "OFFLINE";
+      sedangNavigasi = false;
+      tampilLCD();
+      lastLcdSwitch = millis();
+    }
   }
 }
 
@@ -297,11 +327,12 @@ void setup() {
   lcd.print("Inisialisasi...");
   delay(1000);
 
-  Serial.println("[STEP] Init sensor MQ & DHT...");
+  Serial.println("[STEP] Init sensor MQ, DHT & ACS712...");
   pinMode(MQ7_PIN, INPUT);
   pinMode(MQ135_PIN, INPUT);
+  pinMode(ACS712_PIN, INPUT);
   dht.begin();
-  Serial.println("[OK] MQ & DHT siap");
+  Serial.println("[OK] MQ, DHT & ACS712 siap");
 
   Serial.println("[STEP] Init SDS011...");
   sds.begin(16, 17);
@@ -363,6 +394,9 @@ void loop() {
     avgVOC.push(bacaVOC());
     voc_final = avgVOC.average();
 
+    avgArus.push(bacaArus());
+    arus_final = avgArus.average();
+
     if (millis() - lastBatRead >= BAT_READ_INTERVAL) {
       avgBattery.push(bacaTegangan());
       batteryVoltage = avgBattery.average();
@@ -374,14 +408,14 @@ void loop() {
       lastBatRead = millis();
     }
 
-    Serial.printf(
-        "PM2.5:%.2f PM10:%.2f CO:%.2f VOC:%.2f Suhu:%.2f Bat:%.2fV(%d%%)\n",
-        pm25, pm10, co_final, voc_final, suhu_final, batteryVoltage,
-        batteryPercent);
+    Serial.printf("PM2.5:%.2f PM10:%.2f CO:%.2f VOC:%.2f Suhu:%.2f "
+                  "Bat:%.2fV(%d%%) Arus:%.2fA\n",
+                  pm25, pm10, co_final, voc_final, suhu_final, batteryVoltage,
+                  batteryPercent, arus_final);
   }
 
   if (millis() - lastLcdSwitch >= LCD_SWITCH_INTERVAL) {
-    lcdPage = (lcdPage + 1) % 4;
+    lcdPage = (lcdPage + 1) % 5;
     tampilLCD();
     lastLcdSwitch = millis();
   }

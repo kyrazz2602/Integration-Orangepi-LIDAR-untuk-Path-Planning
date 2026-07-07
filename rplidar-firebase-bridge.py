@@ -152,6 +152,7 @@ class RobotFirebaseBridge(Node):
         self.latest_suhu = 0.0
         self.latest_battery_voltage = 0.0
         self.latest_battery_percent = 0
+        self.latest_arus = 0.0
         self.nav_status = "IDLE"
         self.current_speed_cmd = "OFF"
         self.is_auto_mode = True
@@ -289,7 +290,7 @@ class RobotFirebaseBridge(Node):
                 # Format: $DATA,pm25,pm10,co,voc,suhu,voltage,percent
                 if line.startswith("DATA,"):
                     parts = line.split(",")
-                    if len(parts) == 8:
+                    if len(parts) >= 8:
                         try:
                             self.latest_pm25 = float(parts[1])
                             self.latest_pm10 = float(parts[2])
@@ -298,6 +299,10 @@ class RobotFirebaseBridge(Node):
                             self.latest_suhu = float(parts[5])
                             self.latest_battery_voltage = float(parts[6])
                             self.latest_battery_percent = int(parts[7])
+                            if len(parts) >= 9:
+                                self.latest_arus = float(parts[8])
+                            else:
+                                self.latest_arus = 0.0
 
                             # Upload data to Firebase RTDB
                             self._upload_sensor_data_to_firebase()
@@ -336,7 +341,8 @@ class RobotFirebaseBridge(Node):
                 "VOC": self.latest_voc,
                 "Suhu": self.latest_suhu,
                 "Tegangan": self.latest_battery_voltage,
-                "Persentase": self.latest_battery_percent
+                "Persentase": self.latest_battery_percent,
+                "Arus": self.latest_arus
             }
             self.db_ref.child("Udara").update(data)
             self.get_logger().info(f"✓ Uploaded sensor data to Firebase: {data}")
