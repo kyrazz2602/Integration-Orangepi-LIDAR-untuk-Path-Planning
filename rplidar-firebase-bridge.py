@@ -285,11 +285,17 @@ class RobotFirebaseBridge(Node):
                     continue
 
                 line = line_bytes.decode("utf-8", errors="ignore").strip()
+                if not line:
+                    continue
+
+                # Log raw line for debugging
+                self.get_logger().info(f"[ESP32 RAW] '{line}'")
 
                 # Parse sensor values from ESP32
-                # Format: $DATA,pm25,pm10,co,voc,suhu,voltage,percent
-                if line.startswith("DATA,"):
-                    parts = line.split(",")
+                # Accept both "DATA," and "$DATA," prefixes
+                clean_line = line.lstrip("$")
+                if clean_line.startswith("DATA,"):
+                    parts = clean_line.split(",")
                     if len(parts) >= 8:
                         try:
                             self.latest_pm25 = float(parts[1])
@@ -313,7 +319,9 @@ class RobotFirebaseBridge(Node):
 
                             error_count = 0
                         except ValueError as e:
-                            self.get_logger().warn(f"Failed to parse ESP32 line '{line}': {e}")
+                            self.get_logger().warn(f"Failed to parse ESP32 fields from '{line}': {e}")
+                    else:
+                        self.get_logger().warn(f"ESP32 line has insufficient fields ({len(parts)} < 8): '{line}'")
             except Exception as e:
                 error_count += 1
                 self.get_logger().warn(f"Error reading from ESP32 (attempt {error_count}/{MAX_ERRORS}): {e}")
