@@ -288,8 +288,6 @@ class RobotFirebaseBridge(Node):
                 if not line:
                     continue
 
-                # Log raw line for debugging
-                self.get_logger().info(f"[ESP32 RAW] '{line}'")
 
                 # Parse sensor values from ESP32
                 # Accept both "DATA," and "$DATA," prefixes
@@ -401,8 +399,7 @@ class RobotFirebaseBridge(Node):
             # Reset back to IDLE after showing it once
             self.nav_status = "IDLE"
 
-        online_val = "1" if self.is_online else "0"
-        nav_msg = f"NAV,{status},{mode},{online_val}\n"
+        nav_msg = f"NAV,{status},{mode}\n"
 
         with self.esp_ser_lock:
             if self.esp_connected and self.esp_ser is not None:

@@ -57,11 +57,10 @@ float mq135_b = -1.732;
 // ================= SENSOR ARUS (ACS712-30A) =================
 #define ACS712_PIN 33
 
-// --- Voltage divider ACS712: R1=1k (dari OUT sensor), R2=2k (ke GND, ke ADC)
-// --- Pakai VD_FACTOR yang sama karena rasio pembagi identik dengan MQ sensor
-// (1k:2k)
 float acs_offset = 2.5;        // tegangan tengah saat arus = 0A
 float acs_sensitivity = 0.066; // 66 mV/A untuk tipe 30A
+float arus_koreksi_a =
+    0.7813; // hasil regresi kalibrasi: y = 0,7813x (R² = 0,9998)
 float arus_final = 0;
 
 AverageValue<float> avgCO(10);
@@ -161,13 +160,18 @@ float bacaVOC() {
   return mq135_a * pow(rs_mq135 / mq135_r0, mq135_b);
 }
 
-// ================= FUNGSI ARUS (ACS712-30A) =================
+// ================= FUNGSI ARUS (ACS712-30A, dengan koreksi kalibrasi)
+// =================
 float bacaArus() {
   int adc = analogRead(ACS712_PIN);
   float vout_esp = (adc / ADC_MAX) * VREF;
-  float vout_real = vout_esp * VD_FACTOR; // kembalikan ke tegangan asli sensor
-  float arus = (vout_real - acs_offset) / acs_sensitivity;
-  return arus;
+  float vout_real = vout_esp * VD_FACTOR;
+  float arus_mentah = (vout_real - acs_offset) / acs_sensitivity;
+
+  // Koreksi hasil kalibrasi (regresi linear tanpa offset)
+  float arus_terkoreksi = arus_mentah * arus_koreksi_a;
+
+  return arus_terkoreksi;
 }
 
 // ================= KIRIM DATA SENSOR KE ORANGE PI =================
