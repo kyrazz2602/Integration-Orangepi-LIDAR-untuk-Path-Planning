@@ -675,32 +675,44 @@ class RobotFirebaseBridge(Node):
             if result.returncode == 0:
                 self.get_logger().info(f"✓ Successfully connected to WiFi: {ssid}")
                 if self.firebase_ready and self.db_ref is not None:
-                    self.db_ref.child("Status").update({
-                        "wifi_status": f"Connected to {ssid}",
-                        "wifi_error": ""
-                    })
+                    try:
+                        self.db_ref.child("Status").update({
+                            "wifi_status": f"Connected to {ssid}",
+                            "wifi_error": ""
+                        })
+                    except Exception as e:
+                        self.get_logger().error(f"Failed to update success WiFi status to Firebase: {e}")
             else:
                 error_msg = result.stderr.strip() or result.stdout.strip()
                 self.get_logger().error(f"✗ Failed to connect to WiFi: {error_msg}")
                 if self.firebase_ready and self.db_ref is not None:
-                    self.db_ref.child("Status").update({
-                        "wifi_status": "Failed to connect",
-                        "wifi_error": error_msg[:100]
-                    })
+                    try:
+                        self.db_ref.child("Status").update({
+                            "wifi_status": "Failed to connect",
+                            "wifi_error": error_msg[:100]
+                        })
+                    except Exception as e:
+                        self.get_logger().error(f"Failed to update failed WiFi status to Firebase: {e}")
         except subprocess.TimeoutExpired:
             self.get_logger().error("✗ WiFi connection attempt timed out.")
             if self.firebase_ready and self.db_ref is not None:
-                self.db_ref.child("Status").update({
-                    "wifi_status": "Timeout",
-                    "wifi_error": "Connection timed out (25s)"
-                })
+                try:
+                    self.db_ref.child("Status").update({
+                        "wifi_status": "Timeout",
+                        "wifi_error": "Connection timed out (25s)"
+                    })
+                except Exception as e:
+                    self.get_logger().error(f"Failed to update timeout WiFi status to Firebase: {e}")
         except Exception as e:
             self.get_logger().error(f"✗ WiFi connection error: {e}")
             if self.firebase_ready and self.db_ref is not None:
-                self.db_ref.child("Status").update({
-                    "wifi_status": "Error",
-                    "wifi_error": str(e)[:100]
-                })
+                try:
+                    self.db_ref.child("Status").update({
+                        "wifi_status": "Error",
+                        "wifi_error": str(e)[:100]
+                    })
+                except Exception as ex:
+                    self.get_logger().error(f"Failed to update error WiFi status to Firebase: {ex}")
         finally:
             # Reset trigger in Command/wifi/trigger to False
             if self.command_ref is not None:
