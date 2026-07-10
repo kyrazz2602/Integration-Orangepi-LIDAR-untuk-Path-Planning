@@ -104,6 +104,7 @@ class RobotFirebaseBridge(Node):
 
         # Firebase Listener
         self.command_ref = self.db_ref.child("Command") if self.firebase_ready else None
+        self.listener_thread = None
 
         # Start Firebase Listener in a separate thread so it doesn't block ROS spin
         if self.firebase_ready and self.command_ref is not None:
@@ -592,12 +593,34 @@ class RobotFirebaseBridge(Node):
         threading.Thread(target=self._scan_wifi_worker, daemon=True).start()
 
     def _wifi_status_monitor_loop(self):
-        """Periodically check internet connectivity in the background"""
+        """Periodically check internet connectivity and manage Firebase connection in the background"""
         while rclpy.ok():
             try:
+                # 1. Periksa status koneksi internet
                 self.is_online = (check_wifi_status() == "Connected")
+                
+                # 2. Jika online tapi Firebase belum siap, coba inisialisasi ulang
+                if self.is_online and not self.firebase_ready:
+                    self.get_logger().info("Internet connected. Initializing Firebase dynamically...")
+                    self.firebase_ready = self._init_firebase()
+                    if self.firebase_ready:
+                        self.command_ref = self.db_ref.child("Command")
+                        self.get_logger().info("✓ Firebase dynamically initialized successfully")
+
+                # 3. Jika online & Firebase siap, pastikan listener thread berjalan
+                if self.is_online and self.firebase_ready and self.command_ref is not None:
+                    is_thread_alive = False
+                    if hasattr(self, "listener_thread") and self.listener_thread is not None:
+                        is_thread_alive = self.listener_thread.is_alive()
+                    
+                    if not is_thread_alive:
+                        self.get_logger().info("Firebase listener is not running. Starting/restarting listener thread...")
+                        self.listener_thread = threading.Thread(
+                            target=self._start_firebase_listener, daemon=True
+                        )
+                        self.listener_thread.start()
             except Exception as e:
-                self.get_logger().error(f"Error checking wifi status: {e}")
+                self.get_logger().error(f"Error in wifi status / firebase monitor loop: {e}")
                 self.is_online = False
             time.sleep(10.0)
 
