@@ -105,6 +105,8 @@ class RobotFirebaseBridge(Node):
         # Firebase Listener
         self.command_ref = self.db_ref.child("Command") if self.firebase_ready else None
         self.listener_thread = None
+        self.wifi_connecting = False
+        self.last_wifi_connect_time = 0.0
 
         # Start Firebase Listener in a separate thread so it doesn't block ROS spin
         if self.firebase_ready and self.command_ref is not None:
@@ -581,6 +583,21 @@ class RobotFirebaseBridge(Node):
                     self.get_logger().error(f"Failed to reset scan_trigger in Firebase: {e}")
 
         if (trigger is True or str(trigger).lower() in ["true", "1"]) and ssid:
+            # 1. Guard against concurrent attempts
+            if getattr(self, "wifi_connecting", False):
+                self.get_logger().info("WiFi connection already in progress. Ignoring duplicate trigger.")
+                return
+
+            # 2. Guard against rapid back-to-back triggers (within 30 seconds)
+            current_time = time.time()
+            last_time = getattr(self, "last_wifi_connect_time", 0.0)
+            if current_time - last_time < 30.0:
+                self.get_logger().info("WiFi connection triggered too recently. Ignoring duplicate trigger.")
+                return
+
+            self.wifi_connecting = True
+            self.last_wifi_connect_time = current_time
+
             # Launch background worker so it doesn't block the listener thread
             threading.Thread(
                 target=self.wifi_connect_worker,
@@ -714,6 +731,7 @@ class RobotFirebaseBridge(Node):
                 except Exception as ex:
                     self.get_logger().error(f"Failed to update error WiFi status to Firebase: {ex}")
         finally:
+            self.wifi_connecting = False
             # Reset trigger in Command/wifi/trigger to False
             if self.command_ref is not None:
                 try:
